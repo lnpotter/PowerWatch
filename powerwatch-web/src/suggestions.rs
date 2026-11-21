@@ -294,10 +294,31 @@ fn detect_current_profile() -> Option<PowerProfile> {
 
     #[cfg(target_os = "windows")]
     {
-        // TODO
+        use std::process::Command;
+        if let Ok(output) = Command::new("powercfg").arg("/getactivescheme").output() {
+            if output.status.success() {
+                return parse_windows_active_scheme(&String::from_utf8_lossy(&output.stdout));
+            }
+        }
     }
 
     None
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_windows_active_scheme(text: &str) -> Option<PowerProfile> {
+    let text = text.to_ascii_lowercase();
+    if text.contains("a1841308-3541-4fab-bc81-f71556f20b4a") {
+        Some(PowerProfile::PowerSaver)
+    } else if text.contains("381b4222-f694-41f0-9685-ff5bb260df2e") {
+        Some(PowerProfile::Balanced)
+    } else if text.contains("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c")
+        || text.contains("e9a42b02-d5df-448d-aa00-03f14749eb61")
+    {
+        Some(PowerProfile::Performance)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -449,5 +470,54 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(state.tokens.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn windows_scheme_guids_map_to_profiles() {
+        let line = |guid: &str, name: &str| format!("Power Scheme GUID: {guid}  ({name})\n");
+
+        assert_eq!(
+            parse_windows_active_scheme(&line(
+                "a1841308-3541-4fab-bc81-f71556f20b4a",
+                "Power saver"
+            )),
+            Some(PowerProfile::PowerSaver)
+        );
+        assert_eq!(
+            parse_windows_active_scheme(&line("381b4222-f694-41f0-9685-ff5bb260df2e", "Balanced")),
+            Some(PowerProfile::Balanced)
+        );
+        assert_eq!(
+            parse_windows_active_scheme(&line(
+                "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",
+                "High performance"
+            )),
+            Some(PowerProfile::Performance)
+        );
+        assert_eq!(
+            parse_windows_active_scheme(&line(
+                "e9a42b02-d5df-448d-aa00-03f14749eb61",
+                "Ultimate Performance"
+            )),
+            Some(PowerProfile::Performance)
+        );
+    }
+
+    #[test]
+    fn windows_scheme_is_matched_by_guid_not_by_localized_name() {
+        let output = "GUID do Esquema de Energia: A1841308-3541-4FAB-BC81-F71556F20B4A  (Economia de energia)\n";
+
+        assert_eq!(
+            parse_windows_active_scheme(output),
+            Some(PowerProfile::PowerSaver)
+        );
+    }
+
+    #[test]
+    fn a_custom_windows_scheme_is_unknown() {
+        let output = "Power Scheme GUID: 11111111-2222-3333-4444-555555555555  (My plan)\n";
+
+        assert_eq!(parse_windows_active_scheme(output), None);
+        assert_eq!(parse_windows_active_scheme(""), None);
     }
 }

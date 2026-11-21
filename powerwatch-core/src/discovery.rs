@@ -1,6 +1,8 @@
 use crate::sensors::disk::DiskType;
 use std::path::{Path, PathBuf};
 
+const VIRTUAL_DEVICE_PREFIXES: [&str; 7] = ["loop", "ram", "sr", "zram", "dm-", "md", "nbd"];
+
 pub struct RaplTarget {
     pub energy_path: PathBuf,
     pub max_energy_uj: u64,
@@ -19,16 +21,19 @@ pub fn discover_rapl(powercap_dir: &Path) -> Option<RaplTarget> {
             continue;
         }
 
-        let domain_name = std::fs::read_to_string(path.join("name")).ok()?;
+        let Ok(domain_name) = std::fs::read_to_string(path.join("name")) else {
+            continue;
+        };
         if !domain_name.trim().starts_with("package") {
             continue;
         }
 
-        let max_energy_uj = std::fs::read_to_string(path.join("max_energy_range_uj"))
-            .ok()?
-            .trim()
-            .parse()
-            .ok()?;
+        let Some(max_energy_uj) = std::fs::read_to_string(path.join("max_energy_range_uj"))
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+        else {
+            continue;
+        };
 
         return Some(RaplTarget {
             energy_path: path.join("energy_uj"),
@@ -44,7 +49,9 @@ pub fn discover_amd_gpu(hwmon_dir: &Path) -> Option<PathBuf> {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = std::fs::read_to_string(path.join("name")).ok()?;
+        let Ok(name) = std::fs::read_to_string(path.join("name")) else {
+            continue;
+        };
 
         if name.trim() == "amdgpu" {
             let power_path = path.join("power1_average");
@@ -66,14 +73,20 @@ pub fn discover_primary_disk(block_dir: &Path) -> Option<(String, DiskType)> {
     for entry in candidates {
         let name = entry.file_name().to_string_lossy().to_string();
 
-        if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("sr") {
+        if VIRTUAL_DEVICE_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
             continue;
         }
 
         let disk_type = if name.starts_with("nvme") {
             DiskType::Nvme
         } else {
-            let rotational = std::fs::read_to_string(entry.path().join("queue/rotational")).ok()?;
+            let Ok(rotational) = std::fs::read_to_string(entry.path().join("queue/rotational"))
+            else {
+                continue;
+            };
             if rotational.trim() == "1" {
                 DiskType::Hdd7200Rpm
             } else {
@@ -214,5 +227,82 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         assert!(discover_nvme_controller(&dir.path().join("does-not-exist")).is_none());
+    }
+
+    #[test]
+    fn rapl_skips_domains_it_cannot_read_instead_of_giving_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        for i in 1..=8 {
+            fs::create_dir_all(base.join(format!("intel-rapl:{i}"))).unwrap();
+        }
+        write(base.join("intel-rapl:0/name"), "package-0\n");
+        write(base.join("intel-rapl:0/max_energy_range_uj"), "1000\n");
+
+        let target = discover_rapl(base).unwrap();
+
+        assert_eq!(target.energy_path, base.join("intel-rapl:0/energy_uj"));
+    }
+
+    #[test]
+    fn rapl_moves_on_when_a_package_domain_has_no_energy_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        for i in 1..=8 {
+            write(base.join(format!("intel-rapl:{i}/name")), "package-1\n");
+        }
+        write(base.join("intel-rapl:0/name"), "package-0\n");
+        write(base.join("intel-rapl:0/max_energy_range_uj"), "1000\n");
+
+        assert!(discover_rapl(base).is_some());
+    }
+
+    #[test]
+    fn amdgpu_lookup_skips_hwmon_devices_without_a_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        for i in 0..8 {
+            fs::create_dir_all(base.join(format!("hwmon{i}"))).unwrap();
+        }
+        write(base.join("hwmon9/name"), "amdgpu\n");
+        write(base.join("hwmon9/power1_average"), "45000000\n");
+
+        assert_eq!(
+            discover_amd_gpu(base).unwrap(),
+            base.join("hwmon9/power1_average")
+        );
+    }
+
+    #[test]
+    fn disk_lookup_skips_device_mapper_zram_md_and_nbd() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        for name in ["dm-0", "md0", "nbd0", "zram0"] {
+            write(base.join(format!("{name}/queue/rotational")), "0\n");
+        }
+        write(base.join("nvme0n1/queue/rotational"), "0\n");
+
+        let (name, disk_type) = discover_primary_disk(base).unwrap();
+
+        assert_eq!(name, "nvme0n1");
+        assert_eq!(disk_type, DiskType::Nvme);
+    }
+
+    #[test]
+    fn disk_lookup_skips_a_device_whose_type_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        fs::create_dir_all(base.join("sda")).unwrap();
+        write(base.join("sdb/queue/rotational"), "1\n");
+
+        let (name, disk_type) = discover_primary_disk(base).unwrap();
+
+        assert_eq!(name, "sdb");
+        assert_eq!(disk_type, DiskType::Hdd7200Rpm);
     }
 }

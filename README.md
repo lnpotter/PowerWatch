@@ -21,6 +21,8 @@ Linux is the primary, fully tested platform. Windows and macOS are supported in 
 
 Sensors that aren't available on your machine are silently omitted. Intel iGPUs aren't supported yet.
 
+On Linux, PowerWatch reads the first RAPL package domain, the first AMD GPU and the first physical disk it finds. Virtual block devices (loop, ram, zram, device-mapper, md, nbd) and optical drives are skipped, and an entry it can't read is passed over instead of stopping the search.
+
 On NVMe drives, if `nvme-cli` is installed and the drive is readable, PowerWatch uses the manufacturer's declared max power per power state (`nvme id-ctrl`) rather than a generic guess. It falls back to the heuristic automatically when `nvme-cli` isn't available or the drive isn't NVMe.
 
 ## Install
@@ -139,11 +141,11 @@ The TUI can evaluate power-draw patterns and surface energy-saving suggestions. 
 |-----|--------|
 | `s` | Toggle suggestions panel |
 | `Enter` | Confirm the first actionable suggestion |
-| `y` / `Y` | Apply the selected action |
-| `n` / `N` | Dismiss the suggestion |
+| `y` / `Y` | Apply the action being confirmed |
+| `n` / `N` | Cancel the confirmation (the suggestion stays in the list) |
 | `s` again | Close the panel |
 
-Each suggestion carries a confirmation token to prevent accidental or remote-triggered changes, you must explicitly confirm before any action runs.
+Nothing runs on its own: press `Enter` to open the confirmation, then `y` to apply it. The TUI has two rules, total draw above 75 W or CPU draw above 30 W for 3 seconds, and both propose switching to the power saver profile. The one-time confirmation token belongs to the web dashboard (see below).
 
 ## Web Dashboard
 
@@ -181,11 +183,14 @@ PowerWatch can detect sustained high power draw and propose actions to reduce it
 
 ### Implemented Suggestions
 
-| Suggestion | Condition | Action | Safety |
-|------------|-----------|--------|--------|
-| **Switch to power saver** | Total > 15W for 3s, or CPU > 8W for 3s | Change power profile to `power-saver` | Modifies system profile |
-| **Show top processes** | CPU > 8W for 10s | Display top 5 CPU processes in a modal | Read-only, no system changes |
-| **Show sleep timer** | System appears idle | Display current sleep configuration | Read-only, no system changes |
+| Suggestion | Condition (web) | Condition (TUI) | Action | Safety |
+|------------|-----------------|-----------------|--------|--------|
+| **Switch to power saver** | Total > 15W for 3s, or CPU > 8W for 3s | Total > 75W for 3s, or CPU > 30W for 3s | Change power profile to `power-saver` | Modifies system profile |
+| **Show top processes** | CPU > 8W for 10s | Not available | Display top 5 CPU processes in a modal | Read-only, no system changes |
+
+The web dashboard skips the power saver suggestion when the machine is already in that profile. It reads the current profile with `powerprofilesctl` (Linux), `pmset` (macOS) or `powercfg` (Windows, matched by the scheme's GUID, so localized names work). If the profile can't be detected, for instance with a custom Windows plan or a missing command, the suggestion still appears.
+
+If an action fails (for example `powerprofilesctl` isn't installed), the dashboard shows the error and keeps the suggestion in the list.
 
 ### Power Profile Commands
 
@@ -194,6 +199,8 @@ PowerWatch can detect sustained high power draw and propose actions to reduce it
 | Power Saver | `powerprofilesctl set power-saver` | `pmset -a lowpowermode 1` | `powercfg /setactive SCHEME_MAX` |
 | Balanced | `powerprofilesctl set balanced` | `pmset -a lowpowermode 0` | `powercfg /setactive SCHEME_BALANCED` |
 | Performance | `powerprofilesctl set performance` | `pmset -a lowpowermode 0` | `powercfg /setactive SCHEME_MIN` |
+
+The command is chosen for the OS PowerWatch was built for. On macOS, `pmset -a` may require elevated privileges.
 
 ### Security Notes
 
