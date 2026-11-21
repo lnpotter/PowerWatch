@@ -65,29 +65,6 @@ pub fn macos_command_for_top_processes() -> (&'static str, Vec<String>) {
     )
 }
 
-pub fn linux_command_for_sleep_timer() -> (&'static str, Vec<String>) {
-    (
-        "sh",
-        vec![
-            "-c".to_string(),
-            "loginctl show-session -p IdleAction 2>/dev/null || echo 'IdleAction=none'".to_string(),
-        ],
-    )
-}
-
-pub fn macos_command_for_sleep_timer() -> (&'static str, Vec<String>) {
-    ("sh", vec!["-c".to_string(), "pmset -g 2>/dev/null | grep -E 'sleep|disksleep|displaySleep' || echo 'Sleep settings not available'".to_string()])
-}
-
-pub fn windows_command_for_sleep_timer() -> (&'static str, Vec<String>) {
-    (
-        "powershell",
-        vec![
-            "-command".to_string(),
-            "powercfg /getactivescheme".to_string(),
-        ],
-    )
-}
 pub fn windows_command_for_top_processes() -> (&'static str, Vec<String>) {
     (
         "powershell",
@@ -125,7 +102,6 @@ pub struct PowerProfileActionExecutor<R: CommandRunner> {
     runner: R,
     command_for: fn(PowerProfile) -> (&'static str, Vec<String>),
     command_for_top_processes: fn() -> (&'static str, Vec<String>),
-    command_for_sleep_timer: fn() -> (&'static str, Vec<String>),
 }
 
 impl<R: CommandRunner> PowerProfileActionExecutor<R> {
@@ -133,13 +109,11 @@ impl<R: CommandRunner> PowerProfileActionExecutor<R> {
         runner: R,
         command_for: fn(PowerProfile) -> (&'static str, Vec<String>),
         command_for_top_processes: fn() -> (&'static str, Vec<String>),
-        command_for_sleep_timer: fn() -> (&'static str, Vec<String>),
     ) -> Self {
         Self {
             runner,
             command_for,
             command_for_top_processes,
-            command_for_sleep_timer,
         }
     }
 
@@ -151,10 +125,6 @@ impl<R: CommandRunner> PowerProfileActionExecutor<R> {
             }
             ActionKind::ShowTopProcesses => {
                 let (program, args) = (self.command_for_top_processes)();
-                self.runner.run(program, &args)
-            }
-            ActionKind::ShowSleepTimer => {
-                let (program, args) = (self.command_for_sleep_timer)();
                 self.runner.run(program, &args)
             }
         }
@@ -195,12 +165,15 @@ impl Platform {
         }
     }
 
-    pub fn sleep_timer_command(self) -> (&'static str, Vec<String>) {
-        match self {
-            Platform::Linux => linux_command_for_sleep_timer(),
-            Platform::MacOs => macos_command_for_sleep_timer(),
-            Platform::Windows => windows_command_for_sleep_timer(),
-        }
+    pub fn command_line(self, kind: &ActionKind) -> String {
+        let (program, args) = match kind {
+            ActionKind::SetPowerProfile(profile) => self.profile_command(*profile),
+            ActionKind::ShowTopProcesses => self.top_processes_command(),
+        };
+        std::iter::once(program.to_string())
+            .chain(args)
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -212,17 +185,12 @@ fn top_processes_command_for_current_os() -> (&'static str, Vec<String>) {
     Platform::current().top_processes_command()
 }
 
-fn sleep_timer_command_for_current_os() -> (&'static str, Vec<String>) {
-    Platform::current().sleep_timer_command()
-}
-
 impl PowerProfileActionExecutor<RealCommandRunner> {
     pub fn for_current_os() -> Self {
         Self::new(
             RealCommandRunner,
             profile_command_for_current_os,
             top_processes_command_for_current_os,
-            sleep_timer_command_for_current_os,
         )
     }
 }
@@ -330,7 +298,6 @@ mod tests {
             Fake,
             linux_command_for,
             linux_command_for_top_processes,
-            linux_command_for_sleep_timer,
         );
         assert!(executor
             .apply(&ActionKind::SetPowerProfile(PowerProfile::PowerSaver))
@@ -349,40 +316,10 @@ mod tests {
             Failing,
             linux_command_for,
             linux_command_for_top_processes,
-            linux_command_for_sleep_timer,
         );
         assert!(executor
             .apply(&ActionKind::SetPowerProfile(PowerProfile::PowerSaver))
             .is_err());
-    }
-
-    #[test]
-    fn sleep_timer_commands_are_defined() {
-        assert_eq!(
-            linux_command_for_sleep_timer(),
-            (
-                "sh",
-                vec![
-                    "-c".to_string(),
-                    "loginctl show-session -p IdleAction 2>/dev/null || echo 'IdleAction=none'"
-                        .to_string()
-                ]
-            )
-        );
-        assert_eq!(
-            macos_command_for_sleep_timer(),
-            ("sh", vec!["-c".to_string(), "pmset -g 2>/dev/null | grep -E 'sleep|disksleep|displaySleep' || echo 'Sleep settings not available'".to_string()])
-        );
-        assert_eq!(
-            windows_command_for_sleep_timer(),
-            (
-                "powershell",
-                vec![
-                    "-command".to_string(),
-                    "powercfg /getactivescheme".to_string()
-                ],
-            )
-        );
     }
 
     #[test]
@@ -444,15 +381,62 @@ mod tests {
             Platform::Windows.top_processes_command(),
             windows_command_for_top_processes()
         );
+    }
+
+    #[test]
+    fn the_command_line_shows_exactly_what_will_run() {
+        let power_saver = ActionKind::SetPowerProfile(PowerProfile::PowerSaver);
 
         assert_eq!(
-            Platform::MacOs.sleep_timer_command(),
-            macos_command_for_sleep_timer()
+            Platform::Linux.command_line(&power_saver),
+            "powerprofilesctl set power-saver"
         );
         assert_eq!(
-            Platform::Windows.sleep_timer_command(),
-            windows_command_for_sleep_timer()
+            Platform::MacOs.command_line(&power_saver),
+            "pmset -a lowpowermode 1"
         );
+        assert_eq!(
+            Platform::Windows.command_line(&power_saver),
+            "powercfg /setactive SCHEME_MAX"
+        );
+    }
+
+    #[test]
+    fn the_command_line_is_the_command_the_executor_runs() {
+        use std::sync::{Arc, Mutex};
+
+        struct Recorder(Arc<Mutex<Vec<String>>>);
+        impl CommandRunner for Recorder {
+            fn run(&mut self, program: &str, args: &[String]) -> Result<(), ActionError> {
+                let line = std::iter::once(program.to_string())
+                    .chain(args.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.0.lock().unwrap().push(line);
+                Ok(())
+            }
+        }
+
+        for profile in [
+            PowerProfile::PowerSaver,
+            PowerProfile::Balanced,
+            PowerProfile::Performance,
+        ] {
+            let ran = Arc::new(Mutex::new(Vec::new()));
+            let mut executor = PowerProfileActionExecutor::new(
+                Recorder(ran.clone()),
+                linux_command_for,
+                linux_command_for_top_processes,
+            );
+            let kind = ActionKind::SetPowerProfile(profile);
+
+            executor.apply(&kind).unwrap();
+
+            assert_eq!(
+                *ran.lock().unwrap(),
+                vec![Platform::Linux.command_line(&kind)]
+            );
+        }
     }
 
     #[test]

@@ -9,8 +9,9 @@ use crossterm::terminal::{
 };
 use history::History;
 use powerwatch_core::alerts::{resolve_alert_rule, AlertEvaluator};
+use powerwatch_core::profile::{detect_current_profile, is_redundant};
 use powerwatch_core::runtime::build_default_sampler;
-use powerwatch_core::sampler::Sampler;
+use powerwatch_core::sampler::{Sampler, Snapshot};
 use powerwatch_core::storage::Storage;
 use powerwatch_core::suggestion_board::SuggestionBoard;
 use powerwatch_core::suggestions::{
@@ -186,7 +187,12 @@ fn run(
             {
                 notice = None;
             }
-            board.update_at(&last_snapshot, Instant::now());
+            update_board(
+                &mut board,
+                &last_snapshot,
+                Instant::now(),
+                detect_current_profile,
+            );
             suggestions = visible_suggestions(&board);
             suggestions_state = suggestions_state.synced(&suggestion_items(&board));
 
@@ -275,6 +281,17 @@ fn run(
     }
 
     Ok(())
+}
+
+fn update_board(
+    board: &mut SuggestionBoard,
+    snapshot: &Snapshot,
+    now: Instant,
+    current_profile: impl Fn() -> Option<PowerProfile>,
+) {
+    board.update_at_filtered(snapshot, now, |suggestion| {
+        !is_redundant(suggestion, &current_profile)
+    });
 }
 
 fn visible_suggestions(board: &SuggestionBoard) -> Vec<Suggestion> {
@@ -446,10 +463,69 @@ mod tests {
         }
     }
 
+    fn power_saver_board() -> SuggestionBoard {
+        use powerwatch_core::suggestions::Severity;
+
+        SuggestionBoard::new(vec![SuggestionRule {
+            component_name: "cpu".to_string(),
+            threshold_watts: 1.0,
+            sustained_for: Duration::ZERO,
+            message: "high".to_string(),
+            severity: Severity::Info,
+            action: Some(ActionDescriptor {
+                label: "Switch to power saver".to_string(),
+                kind: ActionKind::SetPowerProfile(PowerProfile::PowerSaver),
+            }),
+        }])
+    }
+
+    fn busy_cpu() -> Snapshot {
+        use chrono::Utc;
+        use powerwatch_core::model::{Component, Confidence, SensorReading};
+
+        Snapshot {
+            timestamp: Utc::now(),
+            results: vec![(
+                "cpu".to_string(),
+                Ok(SensorReading {
+                    component: Component::Cpu,
+                    watts: 40.0,
+                    confidence: Confidence::Measured,
+                    timestamp: Utc::now(),
+                }),
+            )],
+        }
+    }
+
+    #[test]
+    fn power_saver_is_not_suggested_when_already_in_that_profile() {
+        let mut board = power_saver_board();
+
+        update_board(&mut board, &busy_cpu(), Instant::now(), || {
+            Some(PowerProfile::PowerSaver)
+        });
+
+        assert!(board.active().is_empty());
+    }
+
+    #[test]
+    fn power_saver_is_suggested_from_any_other_profile() {
+        for profile in [
+            Some(PowerProfile::Balanced),
+            Some(PowerProfile::Performance),
+            None,
+        ] {
+            let mut board = power_saver_board();
+
+            update_board(&mut board, &busy_cpu(), Instant::now(), || profile);
+
+            assert_eq!(board.active().len(), 1);
+        }
+    }
+
     fn board_with_one_suggestion() -> (SuggestionBoard, u64) {
         use chrono::Utc;
         use powerwatch_core::model::{Component, Confidence, SensorReading};
-        use powerwatch_core::sampler::Snapshot;
         use powerwatch_core::suggestions::Severity;
 
         let mut board = SuggestionBoard::new(vec![SuggestionRule {

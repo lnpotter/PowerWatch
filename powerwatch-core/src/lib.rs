@@ -5,6 +5,7 @@ pub mod duration;
 pub mod hook;
 pub mod json_snapshot;
 pub mod model;
+pub mod profile;
 pub mod runtime;
 pub mod sampler;
 pub mod sensors;

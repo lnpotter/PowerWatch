@@ -1,4 +1,5 @@
-use powerwatch_core::actions::{ActionError, PowerProfileActionExecutor};
+use powerwatch_core::actions::{ActionError, Platform, PowerProfileActionExecutor};
+use powerwatch_core::profile::{detect_current_profile, is_redundant};
 use powerwatch_core::sampler::Snapshot;
 use powerwatch_core::suggestion_board::SuggestionBoard;
 use powerwatch_core::suggestions::{
@@ -82,10 +83,16 @@ impl SuggestionsState {
                         token
                     })
                 });
+                let command = active
+                    .suggestion
+                    .action
+                    .as_ref()
+                    .map(|action| Platform::current().command_line(&action.kind));
                 Proposal {
                     id: active.id,
                     suggestion: active.suggestion.clone(),
                     token,
+                    command,
                 }
             })
             .collect()
@@ -126,16 +133,6 @@ impl SuggestionsState {
 
     pub fn dismiss(&self, id: u64) -> bool {
         self.board.lock().unwrap().dismiss(id)
-    }
-}
-
-fn is_redundant(
-    suggestion: &Suggestion,
-    current_profile: &impl Fn() -> Option<PowerProfile>,
-) -> bool {
-    match suggestion.action.as_ref().map(|action| &action.kind) {
-        Some(ActionKind::SetPowerProfile(target)) => current_profile() == Some(*target),
-        _ => false,
     }
 }
 
@@ -196,6 +193,8 @@ pub struct Proposal {
     pub suggestion: Suggestion,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -251,71 +250,6 @@ pub(crate) fn state_with_one_active_suggestion() -> SuggestionsState {
     state
 }
 
-fn detect_current_profile() -> Option<PowerProfile> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::process::Command;
-        if let Ok(output) = Command::new("powerprofilesctl").arg("get").output() {
-            if output.status.success() {
-                if let Ok(text) = String::from_utf8(output.stdout) {
-                    let text = text.trim();
-                    if text.contains("power-save") {
-                        return Some(PowerProfile::PowerSaver);
-                    } else if text.contains("performance") {
-                        return Some(PowerProfile::Performance);
-                    } else {
-                        return Some(PowerProfile::Balanced);
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
-        if let Ok(output) = Command::new("pmset").args(&["get", "current"]).output() {
-            if output.status.success() {
-                if let Ok(text) = String::from_utf8(output.stdout) {
-                    if text.contains("lowpowermode 1") {
-                        return Some(PowerProfile::PowerSaver);
-                    } else if text.contains("lowpowermode 0") {
-                        return Some(PowerProfile::Balanced);
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::process::Command;
-        if let Ok(output) = Command::new("powercfg").arg("/getactivescheme").output() {
-            if output.status.success() {
-                return parse_windows_active_scheme(&String::from_utf8_lossy(&output.stdout));
-            }
-        }
-    }
-
-    None
-}
-
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn parse_windows_active_scheme(text: &str) -> Option<PowerProfile> {
-    let text = text.to_ascii_lowercase();
-    if text.contains("a1841308-3541-4fab-bc81-f71556f20b4a") {
-        Some(PowerProfile::PowerSaver)
-    } else if text.contains("381b4222-f694-41f0-9685-ff5bb260df2e") {
-        Some(PowerProfile::Balanced)
-    } else if text.contains("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c")
-        || text.contains("e9a42b02-d5df-448d-aa00-03f14749eb61")
-    {
-        Some(PowerProfile::Performance)
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,8 +285,17 @@ mod tests {
         }
     }
 
+    fn clock(seconds: u64) -> Instant {
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        *START.get_or_init(Instant::now) + Duration::from_secs(seconds)
+    }
+
+    fn tick_at(state: &SuggestionsState, watts: f64, seconds: u64) {
+        state.evaluate_at(&snapshot_with("cpu", watts), clock(seconds), || None);
+    }
+
     fn tick(state: &SuggestionsState, watts: f64) {
-        state.evaluate_at(&snapshot_with("cpu", watts), Instant::now(), || None);
+        tick_at(state, watts, 0);
     }
 
     fn messages(state: &SuggestionsState) -> Vec<String> {
@@ -455,9 +398,10 @@ mod tests {
     #[test]
     fn a_token_for_a_suggestion_whose_load_dropped_runs_nothing() {
         let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
-        tick(&state, 40.0);
+        tick_at(&state, 40.0, 0);
         let token = token_for(&state, "cpu");
-        tick(&state, 1.0);
+        tick_at(&state, 1.0, 1);
+        tick_at(&state, 1.0, 10);
         let mut ran = false;
 
         let result = state.apply_with(&token, |_| {
@@ -501,38 +445,56 @@ mod tests {
     #[test]
     fn tokens_of_suggestions_that_went_away_are_dropped() {
         let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
-        tick(&state, 40.0);
+        tick_at(&state, 40.0, 0);
         token_for(&state, "cpu");
 
-        tick(&state, 1.0);
+        tick_at(&state, 1.0, 1);
+        tick_at(&state, 1.0, 10);
         state.list_with_tokens();
 
         assert!(state.tokens.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn a_suggestion_goes_away_when_the_load_drops() {
+    fn a_suggestion_goes_away_once_the_load_has_stayed_down() {
         let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
 
-        tick(&state, 40.0);
+        tick_at(&state, 40.0, 0);
         assert_eq!(messages(&state), vec!["cpu"]);
 
-        tick(&state, 1.0);
+        tick_at(&state, 1.0, 1);
+        assert_eq!(messages(&state), vec!["cpu"]);
+
+        tick_at(&state, 1.0, 10);
         assert!(messages(&state).is_empty());
+    }
+
+    #[test]
+    fn a_brief_dip_keeps_the_suggestion_and_its_token() {
+        let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
+        tick_at(&state, 40.0, 0);
+        let before = token_for(&state, "cpu");
+
+        tick_at(&state, 1.0, 1);
+        tick_at(&state, 40.0, 2);
+
+        assert_eq!(messages(&state), vec!["cpu"]);
+        assert_eq!(token_for(&state, "cpu"), before);
     }
 
     #[test]
     fn a_dismissed_suggestion_stays_gone_until_the_next_excursion() {
         let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
-        tick(&state, 40.0);
+        tick_at(&state, 40.0, 0);
         let id = state.list_with_tokens()[0].id;
 
         assert!(state.dismiss(id));
-        tick(&state, 40.0);
+        tick_at(&state, 40.0, 1);
         assert!(messages(&state).is_empty());
 
-        tick(&state, 1.0);
-        tick(&state, 40.0);
+        tick_at(&state, 1.0, 2);
+        tick_at(&state, 1.0, 10);
+        tick_at(&state, 40.0, 11);
         let again = state.list_with_tokens();
         assert_eq!(again.len(), 1);
         assert_ne!(again[0].id, id);
@@ -608,51 +570,46 @@ mod tests {
     }
 
     #[test]
-    fn windows_scheme_guids_map_to_profiles() {
-        let line = |guid: &str, name: &str| format!("Power Scheme GUID: {guid}  ({name})\n");
+    fn a_proposal_carries_the_command_that_will_run() {
+        let power_saver = SuggestionRule {
+            action: Some(ActionDescriptor {
+                label: "Switch to power saver".to_string(),
+                kind: ActionKind::SetPowerProfile(PowerProfile::PowerSaver),
+            }),
+            ..rule("cpu", 10.0, "saver")
+        };
+        let state = SuggestionsState::with_rules(vec![power_saver]);
+        tick(&state, 40.0);
 
-        assert_eq!(
-            parse_windows_active_scheme(&line(
-                "a1841308-3541-4fab-bc81-f71556f20b4a",
-                "Power saver"
-            )),
-            Some(PowerProfile::PowerSaver)
-        );
-        assert_eq!(
-            parse_windows_active_scheme(&line("381b4222-f694-41f0-9685-ff5bb260df2e", "Balanced")),
-            Some(PowerProfile::Balanced)
-        );
-        assert_eq!(
-            parse_windows_active_scheme(&line(
-                "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",
-                "High performance"
-            )),
-            Some(PowerProfile::Performance)
-        );
-        assert_eq!(
-            parse_windows_active_scheme(&line(
-                "e9a42b02-d5df-448d-aa00-03f14749eb61",
-                "Ultimate Performance"
-            )),
-            Some(PowerProfile::Performance)
-        );
+        let proposal = state.list_with_tokens().remove(0);
+
+        let expected = Platform::current()
+            .command_line(&ActionKind::SetPowerProfile(PowerProfile::PowerSaver));
+        assert_eq!(proposal.command.as_deref(), Some(expected.as_str()));
+        assert!(!expected.is_empty());
     }
 
     #[test]
-    fn windows_scheme_is_matched_by_guid_not_by_localized_name() {
-        let output = "GUID do Esquema de Energia: A1841308-3541-4FAB-BC81-F71556F20B4A  (Economia de energia)\n";
+    fn the_command_is_part_of_the_json_the_dashboard_receives() {
+        let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
+        tick(&state, 40.0);
 
-        assert_eq!(
-            parse_windows_active_scheme(output),
-            Some(PowerProfile::PowerSaver)
-        );
+        let json = serde_json::to_value(state.list_with_tokens()).unwrap();
+
+        assert!(json[0]["command"].as_str().is_some_and(|c| !c.is_empty()));
     }
 
     #[test]
-    fn a_custom_windows_scheme_is_unknown() {
-        let output = "Power Scheme GUID: 11111111-2222-3333-4444-555555555555  (My plan)\n";
+    fn a_suggestion_without_an_action_has_no_command() {
+        let info_only = SuggestionRule {
+            action: None,
+            ..rule("cpu", 10.0, "info")
+        };
+        let state = SuggestionsState::with_rules(vec![info_only]);
+        tick(&state, 40.0);
 
-        assert_eq!(parse_windows_active_scheme(output), None);
-        assert_eq!(parse_windows_active_scheme(""), None);
+        let json = serde_json::to_value(state.list_with_tokens()).unwrap();
+
+        assert!(json[0].get("command").is_none());
     }
 }

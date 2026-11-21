@@ -483,6 +483,8 @@ function setStatus(message) {
 }
 
 
+const suggestionCommands = {};
+
 async function refreshSuggestions() {
   try {
     const res = await fetch("/api/suggestions");
@@ -498,6 +500,10 @@ function renderSuggestions(proposals) {
   const section = document.getElementById("suggestions-section");
   const container = document.getElementById("suggestions-container");
 
+  for (const key of Object.keys(suggestionCommands)) {
+    delete suggestionCommands[key];
+  }
+
   if (!proposals || proposals.length === 0) {
     section.style.display = "none";
     return;
@@ -508,6 +514,9 @@ function renderSuggestions(proposals) {
 
   for (const proposal of proposals) {
     const s = proposal.suggestion;
+    if (proposal.token && proposal.command) {
+      suggestionCommands[proposal.token] = proposal.command;
+    }
     const card = document.createElement("div");
     card.className = `suggestion-card ${s.severity.toLowerCase()}`;
 
@@ -566,7 +575,7 @@ async function applySuggestion(token, actionLabel) {
   pendingApplyLabel = actionLabel;
   
   document.getElementById('confirm-message').textContent = `Are you sure you want to apply: "${actionLabel}"?`;
-  document.getElementById('confirm-command').textContent = `powerprofilesctl set power-saver`;
+  document.getElementById('confirm-command').textContent = suggestionCommands[token] || '';
   openModal('confirm-modal');
 }
 

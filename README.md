@@ -186,9 +186,9 @@ This is intended for your own machine only, there is no authentication or HTTPS.
 
 ## Energy-Saving Suggestions
 
-PowerWatch can detect sustained high power draw and propose actions to reduce it. Every action requires explicit confirmation through a modal dialog with a one-time token; nothing is applied automatically.
+PowerWatch can detect sustained high power draw and propose actions to reduce it. Every action requires explicit confirmation through a modal dialog that shows the exact command it will run, with a one-time token; nothing is applied automatically.
 
-A suggestion appears once per excursion above its threshold and goes away on its own as soon as the draw falls back under it. You can also dismiss it (the `✕` button in the web dashboard, `d` in the TUI). A dismissed suggestion stays gone until the draw drops below the threshold and crosses it again.
+A suggestion appears once per excursion above its threshold and goes away on its own once the draw has stayed under it for 5 seconds, so a brief dip around the threshold does not make it flicker. You can also dismiss it (the `✕` button in the web dashboard, `d` in the TUI). A dismissed suggestion stays gone until the draw has stayed under the threshold for 5 seconds and then crosses it again.
 
 ### Implemented Suggestions
 
@@ -197,7 +197,7 @@ A suggestion appears once per excursion above its threshold and goes away on its
 | **Switch to power saver** | Total > 15W for 3s, or CPU > 8W for 3s | Total > 15W for 3s, or CPU > 8W for 3s | Change power profile to `power-saver` | Modifies system profile |
 | **Show top processes** | CPU > 8W for 10s | Not available | Display top 5 CPU processes in a modal | Read-only, no system changes |
 
-The web dashboard skips the power saver suggestion when the machine is already in that profile. It reads the current profile with `powerprofilesctl` (Linux), `pmset` (macOS) or `powercfg` (Windows, matched by the scheme's GUID, so localized names work). If the profile can't be detected, for instance with a custom Windows plan or a missing command, the suggestion still appears.
+Both the web dashboard and the TUI skip the power saver suggestion when the machine is already in that profile. It reads the current profile with `powerprofilesctl` (Linux), `pmset` (macOS) or `powercfg` (Windows, matched by the scheme's GUID, so localized names work). If the profile can't be detected, for instance with a custom Windows plan or a missing command, the suggestion still appears.
 
 If an action fails (for example `powerprofilesctl` isn't installed), the dashboard shows the error and keeps the suggestion in the list.
 

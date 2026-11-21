@@ -13,7 +13,6 @@ pub enum PowerProfile {
 pub enum ActionKind {
     SetPowerProfile(PowerProfile),
     ShowTopProcesses,
-    ShowSleepTimer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
