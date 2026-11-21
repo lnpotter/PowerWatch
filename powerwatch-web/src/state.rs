@@ -34,23 +34,18 @@ pub fn start_sampling_loop(
         suggestions.evaluate(&snapshot);
 
         if log_continuously {
-            let readings: Vec<_> = snapshot.readings().cloned().collect();
-            let total = snapshot.total();
-            drop(snapshot);
-
             if let Ok(guard) = storage.lock() {
                 if let Some(db) = guard.as_ref() {
-                    for reading in &readings {
+                    for reading in snapshot.readings() {
                         let _ = db.insert_reading(reading);
                     }
-                    if let Some(total) = total {
+                    if let Some(total) = snapshot.total() {
                         let _ = db.insert_reading(&total);
                     }
                 }
             }
         }
 
-        let snapshot = sampler.sample_all();
         if let Ok(mut guard) = latest_snapshot.write() {
             *guard = snapshot;
         }
@@ -93,6 +88,17 @@ mod tests {
         fn sample(&mut self) -> Result<SensorReading, SensorError> {
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(reading(n as f64))
+        }
+    }
+
+    struct TimestampedSensor {
+        calls: Arc<Mutex<Vec<Instant>>>,
+    }
+
+    impl PowerSensor for TimestampedSensor {
+        fn sample(&mut self) -> Result<SensorReading, SensorError> {
+            self.calls.lock().unwrap().push(Instant::now());
+            Ok(reading(1.0))
         }
     }
 
@@ -202,5 +208,33 @@ mod tests {
             .unwrap();
 
         assert!(readings.is_empty());
+    }
+
+    #[test]
+    fn samples_once_per_interval() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut sampler = Sampler::new();
+        sampler.add_sensor(
+            "cpu",
+            Box::new(TimestampedSensor {
+                calls: calls.clone(),
+            }),
+        );
+
+        let interval = Duration::from_millis(50);
+        let _state = start_sampling_loop(sampler, interval, None, false);
+        thread::sleep(Duration::from_millis(400));
+
+        let calls = calls.lock().unwrap();
+        assert!(
+            calls.len() >= 3,
+            "expected several samples, got {}",
+            calls.len()
+        );
+        let min_gap = calls.windows(2).map(|w| w[1] - w[0]).min().unwrap();
+        assert!(
+            min_gap >= interval / 2,
+            "samples were taken {min_gap:?} apart, expected about {interval:?}"
+        );
     }
 }
