@@ -161,7 +161,6 @@ A local HTTP server with a single self-contained HTML page: no separate assets, 
 - **Chart**: click a legend entry to toggle that series; the y-axis rescales so smaller signals stay visible. Hover over the chart for exact values at a given point.
 - **Suggestions**: energy-saving proposals appear in a dedicated section, each with a confirmation modal.
 - **Process monitor**: when CPU draw stays high, a "Show top processes" suggestion opens a modal displaying the five most CPU-intensive processes, refreshing every 2 seconds.
-- **Screensaver**: when the system appears idle with the display active, a suggestion to enable the screensaver appears.
 - **--log** makes the server write to `~/.local/share/powerwatch/history.db` continuously, the same database the CLI's `--log`/`history` and the TUI's `l` key use. Without `--log`, the chart only shows what something else logged.
 
 API endpoints:
@@ -185,7 +184,6 @@ PowerWatch can detect sustained high power draw and propose actions to reduce it
 | Suggestion | Condition | Action | Safety |
 |------------|-----------|--------|--------|
 | **Switch to power saver** | Total > 15W for 3s, or CPU > 8W for 3s | Change power profile to `power-saver` | Modifies system profile |
-| **Enable screensaver** | Total > 20W for 30s (idle heuristic) | Suspend screensaver (`xdg-screensaver suspend`) | Safe, reversible |
 | **Show top processes** | CPU > 8W for 10s | Display top 5 CPU processes in a modal | Read-only, no system changes |
 | **Show sleep timer** | System appears idle | Display current sleep configuration | Read-only, no system changes |
 

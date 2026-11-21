@@ -1,3 +1,7 @@
+use powerwatch_core::actions::{
+    linux_command_for, linux_command_for_sleep_timer, linux_command_for_top_processes, ActionError,
+    PowerProfileActionExecutor, RealCommandRunner,
+};
 use powerwatch_core::sampler::Snapshot;
 use powerwatch_core::suggestions::{
     ActionDescriptor, ActionKind, PowerProfile, Severity, Suggestion,
@@ -10,11 +14,16 @@ use std::time::{Duration, Instant};
 
 const TOKEN_TTL: Duration = Duration::from_secs(60);
 
+struct IssuedToken {
+    component_name: String,
+    issued: Instant,
+}
+
 #[derive(Clone)]
 pub struct SuggestionsState {
     pub engine: Arc<Mutex<SuggestionEngine>>,
     pub active: Arc<Mutex<Vec<Suggestion>>>,
-    pub used_tokens: Arc<Mutex<HashMap<String, Instant>>>,
+    tokens: Arc<Mutex<HashMap<String, IssuedToken>>>,
 }
 
 impl SuggestionsState {
@@ -22,7 +31,7 @@ impl SuggestionsState {
         Self {
             engine: Arc::new(Mutex::new(SuggestionEngine::default())),
             active: Arc::new(Mutex::new(Vec::new())),
-            used_tokens: Arc::new(Mutex::new(HashMap::new())),
+            tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -45,23 +54,30 @@ impl SuggestionsState {
 
     pub fn list_with_tokens(&self) -> Vec<Proposal> {
         let active = self.active.lock().unwrap();
-        let mut used_tokens = self.used_tokens.lock().unwrap();
+        let mut tokens = self.tokens.lock().unwrap();
         let now = Instant::now();
-        used_tokens.retain(|_, issued| now.duration_since(*issued) < TOKEN_TTL);
+        tokens.retain(|_, t| now.duration_since(t.issued) < TOKEN_TTL);
 
         active
             .iter()
             .map(|s| {
-                let token = if s.action.is_some() {
-                    let mut rng = rand::thread_rng();
-                    let token: String = (0..16)
-                        .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
-                        .collect();
-                    used_tokens.insert(token.clone(), now);
-                    Some(token)
-                } else {
-                    None
-                };
+                let token = s.action.as_ref().map(|_| {
+                    let existing = tokens
+                        .iter()
+                        .find(|(_, t)| t.component_name == s.component_name)
+                        .map(|(token, _)| token.clone());
+                    existing.unwrap_or_else(|| {
+                        let token = new_token();
+                        tokens.insert(
+                            token.clone(),
+                            IssuedToken {
+                                component_name: s.component_name.clone(),
+                                issued: now,
+                            },
+                        );
+                        token
+                    })
+                });
                 Proposal {
                     suggestion: s.clone(),
                     token,
@@ -71,38 +87,49 @@ impl SuggestionsState {
     }
 
     pub fn apply(&self, token: &str) -> Result<bool, String> {
-        let mut used_tokens = self.used_tokens.lock().unwrap();
+        self.apply_with(token, apply_action)
+    }
 
-        let now = Instant::now();
-        if !used_tokens.contains_key(token) {
-            return Err("invalid or expired token".to_string());
-        }
-        if now.duration_since(used_tokens[token]) > TOKEN_TTL {
-            used_tokens.remove(token);
+    fn apply_with(
+        &self,
+        token: &str,
+        run: impl FnOnce(&ActionDescriptor) -> Result<(), String>,
+    ) -> Result<bool, String> {
+        let issued = self
+            .tokens
+            .lock()
+            .unwrap()
+            .remove(token)
+            .ok_or_else(|| "invalid or expired token".to_string())?;
+        if issued.issued.elapsed() > TOKEN_TTL {
             return Err("token expired".to_string());
         }
 
-        let mut active = self.active.lock().unwrap();
-        let pos = active.iter().position(|s| s.action.is_some());
+        let action = self
+            .active
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| s.component_name == issued.component_name)
+            .and_then(|s| s.action.clone())
+            .ok_or_else(|| "suggestion is no longer active".to_string())?;
 
-        match pos {
-            Some(pos) => {
-                let suggestion = active.remove(pos);
-                drop(active);
+        run(&action)?;
 
-                if let Some(action) = suggestion.action {
-                    apply_action(&action);
-                }
-
-                used_tokens.remove(token);
-                Ok(true)
-            }
-            None => {
-                used_tokens.remove(token);
-                Err("suggestion already applied".to_string())
-            }
-        }
+        self.active
+            .lock()
+            .unwrap()
+            .retain(|s| s.component_name != issued.component_name);
+        Ok(true)
     }
+}
+
+fn new_token() -> String {
+    rand::thread_rng()
+        .sample_iter(rand::distributions::Alphanumeric)
+        .take(16)
+        .map(char::from)
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -123,77 +150,16 @@ pub struct ApplyResponse {
     pub message: String,
 }
 
-fn apply_action(action: &ActionDescriptor) {
-    match &action.kind {
-        ActionKind::SetPowerProfile(profile) => {
-            use powerwatch_core::actions::{
-                linux_command_for, linux_command_for_screensaver, linux_command_for_sleep_timer,
-                linux_command_for_top_processes, PowerProfileActionExecutor, RealCommandRunner,
-            };
-            let runner = RealCommandRunner;
-            let mut executor = PowerProfileActionExecutor::new(
-                runner,
-                linux_command_for,
-                linux_command_for_screensaver,
-                linux_command_for_top_processes,
-                linux_command_for_sleep_timer,
-            );
-            if let Err(e) = executor.apply(&ActionKind::SetPowerProfile(*profile)) {
-                eprintln!("failed to apply action: {e:?}");
-            }
-        }
-        ActionKind::SetScreensaver(enable) => {
-            use powerwatch_core::actions::{
-                linux_command_for, linux_command_for_screensaver, linux_command_for_sleep_timer,
-                linux_command_for_top_processes, PowerProfileActionExecutor, RealCommandRunner,
-            };
-            let runner = RealCommandRunner;
-            let mut executor = PowerProfileActionExecutor::new(
-                runner,
-                linux_command_for,
-                linux_command_for_screensaver,
-                linux_command_for_top_processes,
-                linux_command_for_sleep_timer,
-            );
-            if let Err(e) = executor.apply(&ActionKind::SetScreensaver(*enable)) {
-                eprintln!("failed to apply screensaver action: {e:?}");
-            }
-        }
-        ActionKind::ShowTopProcesses => {
-            use powerwatch_core::actions::{
-                linux_command_for, linux_command_for_screensaver, linux_command_for_sleep_timer,
-                linux_command_for_top_processes, PowerProfileActionExecutor, RealCommandRunner,
-            };
-            let runner = RealCommandRunner;
-            let mut executor = PowerProfileActionExecutor::new(
-                runner,
-                linux_command_for,
-                linux_command_for_screensaver,
-                linux_command_for_top_processes,
-                linux_command_for_sleep_timer,
-            );
-            if let Err(e) = executor.apply(&ActionKind::ShowTopProcesses) {
-                eprintln!("failed to run top processes command: {e:?}");
-            }
-        }
-        ActionKind::ShowSleepTimer => {
-            use powerwatch_core::actions::{
-                linux_command_for, linux_command_for_screensaver, linux_command_for_sleep_timer,
-                linux_command_for_top_processes, PowerProfileActionExecutor, RealCommandRunner,
-            };
-            let runner = RealCommandRunner;
-            let mut executor = PowerProfileActionExecutor::new(
-                runner,
-                linux_command_for,
-                linux_command_for_screensaver,
-                linux_command_for_top_processes,
-                linux_command_for_sleep_timer,
-            );
-            if let Err(e) = executor.apply(&ActionKind::ShowSleepTimer) {
-                eprintln!("failed to run sleep timer command: {e:?}");
-            }
-        }
-    }
+fn apply_action(action: &ActionDescriptor) -> Result<(), String> {
+    let mut executor = PowerProfileActionExecutor::new(
+        RealCommandRunner,
+        linux_command_for,
+        linux_command_for_top_processes,
+        linux_command_for_sleep_timer,
+    );
+    executor.apply(&action.kind).map_err(|e| match e {
+        ActionError::Unsupported(msg) | ActionError::ExecutionFailed(msg) => msg,
+    })
 }
 
 #[derive(Default)]
@@ -261,30 +227,6 @@ impl SuggestionEngine {
                 }
             } else {
                 self.fired.remove("cpu_high");
-            }
-        }
-
-        if let Some(total) = snapshot.total() {
-            if total.watts > 20.0 {
-                let key = "display_idle".to_string();
-                let entry = self.fired.entry(key.clone()).or_insert((0.0, now));
-                if entry.0 < 20.0 {
-                    entry.0 = total.watts;
-                    entry.1 = now;
-                } else if now.duration_since(entry.1) >= Duration::from_secs(30) {
-                    suggestions.push(Suggestion {
-                        message: "System appears idle with display active. Consider enabling screensaver to save energy.".to_string(),
-                        component_name: "display".to_string(),
-                        severity: Severity::Info,
-                        action: Some(ActionDescriptor {
-                            label: "Enable screensaver".to_string(),
-                            kind: ActionKind::SetScreensaver(true),
-                        }),
-                    });
-                    self.fired.remove(&key);
-                }
-            } else {
-                self.fired.remove("display_idle");
             }
         }
 
@@ -404,5 +346,115 @@ mod tests {
         let state = SuggestionsState::new();
         let suggestions = state.list_with_tokens();
         assert!(suggestions.is_empty());
+    }
+
+    fn suggestion(component: &str) -> Suggestion {
+        Suggestion {
+            message: component.to_string(),
+            component_name: component.to_string(),
+            severity: Severity::Info,
+            action: Some(ActionDescriptor {
+                label: component.to_string(),
+                kind: ActionKind::ShowTopProcesses,
+            }),
+        }
+    }
+
+    fn state_with(components: &[&str]) -> SuggestionsState {
+        let state = SuggestionsState::new();
+        *state.active.lock().unwrap() = components.iter().map(|c| suggestion(c)).collect();
+        state
+    }
+
+    fn token_for(state: &SuggestionsState, component: &str) -> String {
+        state
+            .list_with_tokens()
+            .into_iter()
+            .find(|p| p.suggestion.component_name == component)
+            .and_then(|p| p.token)
+            .unwrap()
+    }
+
+    fn remaining(state: &SuggestionsState) -> Vec<String> {
+        let active = state.active.lock().unwrap();
+        active.iter().map(|s| s.component_name.clone()).collect()
+    }
+
+    #[test]
+    fn a_token_applies_only_its_own_suggestion() {
+        let state = state_with(&["cpu", "total"]);
+        let token = token_for(&state, "total");
+        let mut ran = Vec::new();
+
+        state
+            .apply_with(&token, |action| {
+                ran.push(action.label.clone());
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(ran, vec!["total"]);
+        assert_eq!(remaining(&state), vec!["cpu"]);
+    }
+
+    #[test]
+    fn a_failed_action_is_reported_and_the_suggestion_stays() {
+        let state = state_with(&["cpu"]);
+        let token = token_for(&state, "cpu");
+
+        let result = state.apply_with(&token, |_| Err("powerprofilesctl not found".to_string()));
+
+        assert_eq!(result, Err("powerprofilesctl not found".to_string()));
+        assert_eq!(remaining(&state), vec!["cpu"]);
+    }
+
+    #[test]
+    fn a_token_works_only_once() {
+        let state = state_with(&["cpu"]);
+        let token = token_for(&state, "cpu");
+
+        assert!(state.apply_with(&token, |_| Ok(())).is_ok());
+        assert!(state.apply_with(&token, |_| Ok(())).is_err());
+    }
+
+    #[test]
+    fn an_unknown_token_runs_nothing() {
+        let state = state_with(&["cpu"]);
+        let mut ran = false;
+
+        let result = state.apply_with("made-up", |_| {
+            ran = true;
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        assert!(!ran);
+    }
+
+    #[test]
+    fn a_token_for_a_suggestion_that_is_gone_runs_nothing() {
+        let state = state_with(&["cpu"]);
+        let token = token_for(&state, "cpu");
+        state.active.lock().unwrap().clear();
+        let mut ran = false;
+
+        let result = state.apply_with(&token, |_| {
+            ran = true;
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        assert!(!ran);
+    }
+
+    #[test]
+    fn listing_again_reuses_the_token_instead_of_issuing_new_ones() {
+        let state = state_with(&["cpu"]);
+
+        let first = token_for(&state, "cpu");
+        let second = token_for(&state, "cpu");
+
+        assert_eq!(first, second);
+        assert_eq!(state.tokens.lock().unwrap().len(), 1);
     }
 }

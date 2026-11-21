@@ -45,31 +45,6 @@ pub fn macos_command_for(profile: PowerProfile) -> (&'static str, Vec<String>) {
     )
 }
 
-pub fn linux_command_for_screensaver(enable: bool) -> (&'static str, Vec<String>) {
-    if enable {
-        ("xdg-screensaver", vec!["suspend".to_string()])
-    } else {
-        ("xdg-screensaver", vec!["resume".to_string()])
-    }
-}
-
-pub fn macos_command_for_screensaver() -> (&'static str, Vec<String>) {
-    ("pmset", vec!["displaysleep".to_string(), "now".to_string()])
-}
-
-pub fn windows_command_for_screensaver() -> (&'static str, Vec<String>) {
-    (
-        "rundll32.exe",
-        vec![
-            "powrprof.dll".to_string(),
-            "SetSuspendState".to_string(),
-            "0".to_string(),
-            "1".to_string(),
-            "0".to_string(),
-        ],
-    )
-}
-
 pub fn linux_command_for_top_processes() -> (&'static str, Vec<String>) {
     (
         "sh",
@@ -149,7 +124,6 @@ impl CommandRunner for RealCommandRunner {
 pub struct PowerProfileActionExecutor<R: CommandRunner> {
     runner: R,
     command_for: fn(PowerProfile) -> (&'static str, Vec<String>),
-    command_for_screensaver: fn(bool) -> (&'static str, Vec<String>),
     command_for_top_processes: fn() -> (&'static str, Vec<String>),
     command_for_sleep_timer: fn() -> (&'static str, Vec<String>),
 }
@@ -158,14 +132,12 @@ impl<R: CommandRunner> PowerProfileActionExecutor<R> {
     pub fn new(
         runner: R,
         command_for: fn(PowerProfile) -> (&'static str, Vec<String>),
-        command_for_screensaver: fn(bool) -> (&'static str, Vec<String>),
         command_for_top_processes: fn() -> (&'static str, Vec<String>),
         command_for_sleep_timer: fn() -> (&'static str, Vec<String>),
     ) -> Self {
         Self {
             runner,
             command_for,
-            command_for_screensaver,
             command_for_top_processes,
             command_for_sleep_timer,
         }
@@ -175,10 +147,6 @@ impl<R: CommandRunner> PowerProfileActionExecutor<R> {
         match action {
             ActionKind::SetPowerProfile(profile) => {
                 let (program, args) = (self.command_for)(*profile);
-                self.runner.run(program, &args)
-            }
-            ActionKind::SetScreensaver(enable) => {
-                let (program, args) = (self.command_for_screensaver)(*enable);
                 self.runner.run(program, &args)
             }
             ActionKind::ShowTopProcesses => {
@@ -218,43 +186,6 @@ mod tests {
             (
                 "powerprofilesctl",
                 vec!["set".to_string(), "performance".to_string()]
-            )
-        );
-    }
-
-    #[test]
-    fn linux_screensaver_command_enables_and_disables() {
-        assert_eq!(
-            linux_command_for_screensaver(true),
-            ("xdg-screensaver", vec!["suspend".to_string()])
-        );
-        assert_eq!(
-            linux_command_for_screensaver(false),
-            ("xdg-screensaver", vec!["resume".to_string()])
-        );
-    }
-
-    #[test]
-    fn macos_screensaver_command() {
-        assert_eq!(
-            macos_command_for_screensaver(),
-            ("pmset", vec!["displaysleep".to_string(), "now".to_string()])
-        );
-    }
-
-    #[test]
-    fn windows_screensaver_command() {
-        assert_eq!(
-            windows_command_for_screensaver(),
-            (
-                "rundll32.exe",
-                vec![
-                    "powrprof.dll".to_string(),
-                    "SetSuspendState".to_string(),
-                    "0".to_string(),
-                    "1".to_string(),
-                    "0".to_string(),
-                ],
             )
         );
     }
@@ -332,7 +263,6 @@ mod tests {
         let mut executor = PowerProfileActionExecutor::new(
             Fake,
             linux_command_for,
-            linux_command_for_screensaver,
             linux_command_for_top_processes,
             linux_command_for_sleep_timer,
         );
@@ -352,7 +282,6 @@ mod tests {
         let mut executor = PowerProfileActionExecutor::new(
             Failing,
             linux_command_for,
-            linux_command_for_screensaver,
             linux_command_for_top_processes,
             linux_command_for_sleep_timer,
         );

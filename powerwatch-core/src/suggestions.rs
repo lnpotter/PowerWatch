@@ -12,7 +12,6 @@ pub enum PowerProfile {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActionKind {
     SetPowerProfile(PowerProfile),
-    SetScreensaver(bool),
     ShowTopProcesses,
     ShowSleepTimer,
 }
@@ -181,14 +180,6 @@ mod tests {
         let suggestions = engine.evaluate_at(&snapshot_with(80.0), t0 + Duration::from_secs(1));
 
         assert_eq!(suggestions[0].action, None);
-    }
-
-    #[test]
-    fn screensaver_action_kind_serializes_correctly() {
-        let kind = ActionKind::SetScreensaver(true);
-        let json = serde_json::to_string(&kind).unwrap();
-        assert!(json.contains("SetScreensaver"));
-        assert!(json.contains("true"));
     }
 
     #[test]

@@ -307,75 +307,18 @@ fn run(
 }
 
 fn apply_action(action: &powerwatch_core::suggestions::ActionDescriptor) {
-    match &action.kind {
-        ActionKind::SetPowerProfile(profile) => {
-            use powerwatch_core::actions::{
-                linux_command_for, linux_command_for_screensaver, linux_command_for_sleep_timer,
-                linux_command_for_top_processes, PowerProfileActionExecutor, RealCommandRunner,
-            };
-            let runner = RealCommandRunner;
-            let mut executor = PowerProfileActionExecutor::new(
-                runner,
-                linux_command_for,
-                linux_command_for_screensaver,
-                linux_command_for_top_processes,
-                linux_command_for_sleep_timer,
-            );
-            if let Err(e) = executor.apply(&ActionKind::SetPowerProfile(*profile)) {
-                eprintln!("failed to apply action: {e:?}");
-            }
-        }
-        ActionKind::SetScreensaver(enable) => {
-            use powerwatch_core::actions::{
-                linux_command_for, linux_command_for_screensaver, linux_command_for_sleep_timer,
-                linux_command_for_top_processes, PowerProfileActionExecutor, RealCommandRunner,
-            };
-            let runner = RealCommandRunner;
-            let mut executor = PowerProfileActionExecutor::new(
-                runner,
-                linux_command_for,
-                linux_command_for_screensaver,
-                linux_command_for_top_processes,
-                linux_command_for_sleep_timer,
-            );
-            if let Err(e) = executor.apply(&ActionKind::SetScreensaver(*enable)) {
-                eprintln!("failed to apply screensaver action: {e:?}");
-            }
-        }
-        ActionKind::ShowTopProcesses => {
-            use powerwatch_core::actions::{
-                linux_command_for, linux_command_for_screensaver, linux_command_for_sleep_timer,
-                linux_command_for_top_processes, PowerProfileActionExecutor, RealCommandRunner,
-            };
-            let runner = RealCommandRunner;
-            let mut executor = PowerProfileActionExecutor::new(
-                runner,
-                linux_command_for,
-                linux_command_for_screensaver,
-                linux_command_for_top_processes,
-                linux_command_for_sleep_timer,
-            );
-            if let Err(e) = executor.apply(&ActionKind::ShowTopProcesses) {
-                eprintln!("failed to run top processes command: {e:?}");
-            }
-        }
-        ActionKind::ShowSleepTimer => {
-            use powerwatch_core::actions::{
-                linux_command_for, linux_command_for_screensaver, linux_command_for_sleep_timer,
-                linux_command_for_top_processes, PowerProfileActionExecutor, RealCommandRunner,
-            };
-            let runner = RealCommandRunner;
-            let mut executor = PowerProfileActionExecutor::new(
-                runner,
-                linux_command_for,
-                linux_command_for_screensaver,
-                linux_command_for_top_processes,
-                linux_command_for_sleep_timer,
-            );
-            if let Err(e) = executor.apply(&ActionKind::ShowSleepTimer) {
-                eprintln!("failed to run sleep timer command: {e:?}");
-            }
-        }
+    use powerwatch_core::actions::{
+        linux_command_for, linux_command_for_sleep_timer, linux_command_for_top_processes,
+        PowerProfileActionExecutor, RealCommandRunner,
+    };
+    let mut executor = PowerProfileActionExecutor::new(
+        RealCommandRunner,
+        linux_command_for,
+        linux_command_for_top_processes,
+        linux_command_for_sleep_timer,
+    );
+    if let Err(e) = executor.apply(&action.kind) {
+        eprintln!("failed to apply action: {e:?}");
     }
 }
 
