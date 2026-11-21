@@ -3,7 +3,7 @@ use powerwatch_core::model::Confidence;
 use powerwatch_core::sampler::Snapshot;
 use powerwatch_core::suggestions::Suggestion;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Sparkline, Table};
 use ratatui::Frame;
@@ -46,11 +46,12 @@ pub fn render(
     alert_active: bool,
     suggestions_state: &crate::state::SuggestionsState,
     suggestions: &[Suggestion],
+    notice: Option<&str>,
 ) {
     let area = frame.size();
 
     if suggestions_state.is_open() {
-        render_suggestions_panel(frame, area, suggestions_state, suggestions);
+        render_suggestions_panel(frame, area, suggestions_state, suggestions, notice);
         return;
     }
 
@@ -103,6 +104,7 @@ fn render_suggestions_panel(
     area: Rect,
     state: &crate::state::SuggestionsState,
     suggestions: &[Suggestion],
+    notice: Option<&str>,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -116,49 +118,58 @@ fn render_suggestions_panel(
     });
 
     if suggestions.is_empty() {
-        let text = Paragraph::new("No suggestions");
-        frame.render_widget(text, inner);
-        return;
+        frame.render_widget(Paragraph::new("No suggestions"), inner);
+    } else {
+        let header = Row::new(vec![
+            Span::raw("  Message"),
+            Span::styled("Action", Style::default().fg(Color::Yellow)),
+        ]);
+
+        let selected = state.selected();
+        let rows: Vec<Row> = suggestions
+            .iter()
+            .enumerate()
+            .map(|(index, s)| {
+                let action = match &s.action {
+                    Some(a) => a.label.clone(),
+                    None => "(info only)".to_string(),
+                };
+                let action_color = if s.action.is_some() {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                };
+                let is_selected = selected == Some(index);
+                let marker = if is_selected { "> " } else { "  " };
+                let row = Row::new(vec![
+                    Span::raw(format!("{marker}{}", s.message)),
+                    Span::styled(action, Style::default().fg(action_color)),
+                ]);
+                if is_selected {
+                    row.style(Style::default().add_modifier(Modifier::REVERSED))
+                } else {
+                    row
+                }
+            })
+            .collect();
+
+        let table = Table::new(
+            rows,
+            [Constraint::Percentage(60), Constraint::Percentage(40)],
+        )
+        .header(header)
+        .block(Block::default().borders(Borders::NONE));
+
+        frame.render_widget(table, inner);
     }
 
-    let header = Line::from(vec![
-        Span::raw(" Message"),
-        Span::raw(" | "),
-        Span::styled(" Action", Style::default().fg(Color::Yellow)),
-    ]);
-
-    let rows: Vec<Row> = suggestions
-        .iter()
-        .map(|s| {
-            let action = match &s.action {
-                Some(a) => a.label.clone(),
-                None => "(info only)".to_string(),
-            };
-            let action_color = if s.action.is_some() {
-                Color::Yellow
-            } else {
-                Color::DarkGray
-            };
-            Row::new(vec![
-                Span::raw(s.message.clone()),
-                Span::styled(action, Style::default().fg(action_color)),
-            ])
-        })
-        .collect();
-
-    let table = Table::new(
-        rows,
-        [Constraint::Percentage(60), Constraint::Percentage(40)],
-    )
-    .header(Row::new(header))
-    .block(Block::default().borders(Borders::NONE));
-
-    frame.render_widget(table, inner);
-    let footer_text = match state {
-        crate::state::SuggestionsState::Confirming => "  [y] apply  [n] cancel  [any] cancel ",
-        _ => "  [s] close  [enter] apply first action  ",
+    let footer_color = if notice.is_some() {
+        Color::Yellow
+    } else {
+        Color::DarkGray
     };
-    let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new(panel_footer(state, suggestions.is_empty(), notice))
+        .style(Style::default().fg(footer_color));
     let footer_area = Rect {
         x: area.x,
         y: area.y + area.height - 1,
@@ -166,6 +177,21 @@ fn render_suggestions_panel(
         height: 1,
     };
     frame.render_widget(footer, footer_area);
+}
+
+fn panel_footer(
+    state: &crate::state::SuggestionsState,
+    is_empty: bool,
+    notice: Option<&str>,
+) -> String {
+    match (notice, state) {
+        (Some(message), _) => format!("  {message}  "),
+        (None, crate::state::SuggestionsState::Confirming { .. }) => {
+            "  [y] apply  [n] cancel  ".to_string()
+        }
+        (None, _) if is_empty => "  [s] close  ".to_string(),
+        (None, _) => "  [up/down] select  [enter] apply  [d] dismiss  [s] close  ".to_string(),
+    }
 }
 
 fn render_alert_banner(frame: &mut Frame, area: Rect) {
@@ -325,6 +351,131 @@ mod tests {
         text
     }
 
+    fn suggestion(message: &str, with_action: bool) -> Suggestion {
+        Suggestion {
+            message: message.to_string(),
+            component_name: "cpu".to_string(),
+            severity: powerwatch_core::suggestions::Severity::Info,
+            action: with_action.then(|| powerwatch_core::suggestions::ActionDescriptor {
+                label: "Do it".to_string(),
+                kind: powerwatch_core::suggestions::ActionKind::ShowTopProcesses,
+            }),
+        }
+    }
+
+    fn render_panel(state: SuggestionsState, suggestions: &[Suggestion]) -> String {
+        render_panel_with_notice(state, suggestions, None)
+    }
+
+    fn render_panel_with_notice(
+        state: SuggestionsState,
+        suggestions: &[Suggestion],
+        notice: Option<&str>,
+    ) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        let snapshot = Snapshot {
+            timestamp: Utc::now(),
+            results: Vec::new(),
+        };
+        let history = History::new(10);
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &snapshot,
+                    &history,
+                    false,
+                    false,
+                    false,
+                    &state,
+                    suggestions,
+                    notice,
+                )
+            })
+            .unwrap();
+
+        buffer_text(&terminal)
+    }
+
+    #[test]
+    fn the_suggestions_panel_marks_the_selected_row() {
+        let suggestions = [
+            suggestion("first one", true),
+            suggestion("second one", true),
+        ];
+
+        let text = render_panel(SuggestionsState::Open { selected: 1 }, &suggestions);
+
+        assert!(text.contains("> second one"));
+        assert!(!text.contains("> first one"));
+        assert!(text.contains("  first one"));
+    }
+
+    #[test]
+    fn the_suggestions_panel_lists_the_keys_for_selecting_and_dismissing() {
+        let suggestions = [suggestion("first one", true)];
+
+        let text = render_panel(SuggestionsState::Open { selected: 0 }, &suggestions);
+
+        assert!(text.contains("[d] dismiss"));
+        assert!(text.contains("[enter] apply"));
+    }
+
+    #[test]
+    fn the_confirmation_footer_only_offers_apply_and_cancel() {
+        let suggestions = [suggestion("first one", true)];
+
+        let text = render_panel(
+            SuggestionsState::Confirming { id: 1, selected: 0 },
+            &suggestions,
+        );
+
+        assert!(text.contains("[y] apply"));
+        assert!(text.contains("[n] cancel"));
+        assert!(!text.contains("[d] dismiss"));
+    }
+
+    #[test]
+    fn the_panel_has_an_action_column_header() {
+        let suggestions = [suggestion("first one", true)];
+
+        let text = render_panel(SuggestionsState::Open { selected: 0 }, &suggestions);
+
+        assert!(text.contains("Message"));
+        assert!(text.contains("Action"));
+        assert!(!text.contains(" | "));
+    }
+
+    #[test]
+    fn a_notice_replaces_the_key_hints_in_the_footer() {
+        let suggestions = [suggestion("first one", true)];
+
+        let text = render_panel_with_notice(
+            SuggestionsState::Open { selected: 0 },
+            &suggestions,
+            Some("Failed: powerprofilesctl is missing"),
+        );
+
+        assert!(text.contains("Failed: powerprofilesctl is missing"));
+        assert!(!text.contains("[d] dismiss"));
+    }
+
+    #[test]
+    fn the_footer_is_still_drawn_when_the_list_is_empty() {
+        let text = render_panel(SuggestionsState::Open { selected: 0 }, &[]);
+
+        assert!(text.contains("No suggestions"));
+        assert!(text.contains("[s] close"));
+    }
+
+    #[test]
+    fn the_suggestions_panel_says_so_when_there_is_nothing_to_show() {
+        let text = render_panel(SuggestionsState::Open { selected: 0 }, &[]);
+
+        assert!(text.contains("No suggestions"));
+    }
+
     #[test]
     fn shows_the_total_watts_and_confidence() {
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
@@ -348,6 +499,7 @@ mod tests {
                     false,
                     &SuggestionsState::Closed,
                     &[],
+                    None,
                 )
             })
             .unwrap();
@@ -386,6 +538,7 @@ mod tests {
                     false,
                     &SuggestionsState::Closed,
                     &[],
+                    None,
                 )
             })
             .unwrap();
@@ -420,6 +573,7 @@ mod tests {
                     false,
                     &SuggestionsState::Closed,
                     &[],
+                    None,
                 )
             })
             .unwrap();
@@ -449,6 +603,7 @@ mod tests {
                     false,
                     &SuggestionsState::Closed,
                     &[],
+                    None,
                 )
             })
             .unwrap();
@@ -477,6 +632,7 @@ mod tests {
                     false,
                     &SuggestionsState::Closed,
                     &[],
+                    None,
                 )
             })
             .unwrap();
@@ -505,6 +661,7 @@ mod tests {
                     false,
                     &SuggestionsState::Closed,
                     &[],
+                    None,
                 )
             })
             .unwrap();
@@ -533,6 +690,7 @@ mod tests {
                     false,
                     &SuggestionsState::Closed,
                     &[],
+                    None,
                 )
             })
             .unwrap();
@@ -561,6 +719,7 @@ mod tests {
                     false,
                     &SuggestionsState::Closed,
                     &[],
+                    None,
                 )
             })
             .unwrap();
@@ -589,6 +748,7 @@ mod tests {
                     true,
                     &SuggestionsState::Closed,
                     &[],
+                    None,
                 )
             })
             .unwrap();
@@ -617,6 +777,7 @@ mod tests {
                     false,
                     &SuggestionsState::Closed,
                     &[],
+                    None,
                 )
             })
             .unwrap();
@@ -648,6 +809,7 @@ mod tests {
                     false,
                     &SuggestionsState::Closed,
                     &[],
+                    None,
                 )
             })
             .unwrap();
@@ -687,6 +849,7 @@ mod tests {
                     false,
                     &SuggestionsState::Closed,
                     &[],
+                    None,
                 )
             })
             .unwrap();
@@ -719,6 +882,7 @@ mod tests {
                     false,
                     &SuggestionsState::Closed,
                     &[],
+                    None,
                 )
             })
             .unwrap();

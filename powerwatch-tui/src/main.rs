@@ -2,7 +2,7 @@ mod history;
 mod render;
 mod state;
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -12,8 +12,9 @@ use powerwatch_core::alerts::{resolve_alert_rule, AlertEvaluator};
 use powerwatch_core::runtime::build_default_sampler;
 use powerwatch_core::sampler::Sampler;
 use powerwatch_core::storage::Storage;
+use powerwatch_core::suggestion_board::SuggestionBoard;
 use powerwatch_core::suggestions::{
-    ActionKind, PowerProfile, Suggestion, SuggestionEngine, SuggestionRule,
+    ActionDescriptor, ActionKind, PowerProfile, Suggestion, SuggestionRule,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -34,6 +35,7 @@ struct Args {
 }
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const NOTICE_DURATION: Duration = Duration::from_secs(5);
 const HISTORY_CAPACITY: usize = 60;
 
 fn history_db_path() -> PathBuf {
@@ -104,7 +106,9 @@ fn main() -> io::Result<()> {
     result
 }
 
-use state::{LoggingState, RunState, SuggestionsState};
+use state::{
+    LoggingState, RunState, SuggestionItem, SuggestionsEffect, SuggestionsKey, SuggestionsState,
+};
 
 fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -118,10 +122,10 @@ fn run(
     let mut logging_state = LoggingState::default();
     let mut suggestions_state = SuggestionsState::default();
 
-    let mut suggestion_engine = SuggestionEngine::new(vec![
+    let mut board = SuggestionBoard::new(vec![
         SuggestionRule {
             component_name: "total".to_string(),
-            threshold_watts: 75.0,
+            threshold_watts: 15.0,
             sustained_for: Duration::from_secs(3),  // shortened from 10s
             message: "Total power draw has been high for a while. Consider switching to power saver profile.".to_string(),
             severity: powerwatch_core::suggestions::Severity::Warning,
@@ -132,7 +136,7 @@ fn run(
         },
         SuggestionRule {
             component_name: "cpu".to_string(),
-            threshold_watts: 30.0,
+            threshold_watts: 8.0,
             sustained_for: Duration::from_secs(3),  // shortened from 15s
             message: "CPU power draw has been high. Consider reducing workload or switching to power saver.".to_string(),
             severity: powerwatch_core::suggestions::Severity::Warning,
@@ -144,6 +148,7 @@ fn run(
     ]);
 
     let mut suggestions: Vec<Suggestion> = Vec::new();
+    let mut notice: Option<(String, Instant)> = None;
     let mut last_snapshot = sampler.sample_all();
     history.record(&last_snapshot);
     let mut alert_active = false;
@@ -156,6 +161,7 @@ fn run(
         alert_active,
         &suggestions_state,
         &suggestions,
+        notice_text(&notice),
     )?;
     let mut last_sample = Instant::now();
 
@@ -174,10 +180,15 @@ fn run(
                 }
                 alert_active = evaluator.is_active();
             }
-            let new_suggestions = suggestion_engine.evaluate_at(&last_snapshot, Instant::now());
-            for s in new_suggestions {
-                suggestions.push(s);
+            if notice
+                .as_ref()
+                .is_some_and(|(_, shown)| shown.elapsed() >= NOTICE_DURATION)
+            {
+                notice = None;
             }
+            board.update_at(&last_snapshot, Instant::now());
+            suggestions = visible_suggestions(&board);
+            suggestions_state = suggestions_state.synced(&suggestion_items(&board));
 
             draw(
                 terminal,
@@ -188,12 +199,17 @@ fn run(
                 alert_active,
                 &suggestions_state,
                 &suggestions,
+                notice_text(&notice),
             )?;
             last_sample = Instant::now();
         }
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                let suggestions_key = suggestions_key_for(key.code, suggestions_state);
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Char('p') => {
@@ -207,6 +223,7 @@ fn run(
                             alert_active,
                             &suggestions_state,
                             &suggestions,
+                            notice_text(&notice),
                         )?;
                     }
                     KeyCode::Char('l') if storage.is_some() => {
@@ -220,84 +237,33 @@ fn run(
                             alert_active,
                             &suggestions_state,
                             &suggestions,
+                            notice_text(&notice),
                         )?;
                     }
-                    KeyCode::Char('s') => {
-                        match suggestions_state {
-                            SuggestionsState::Closed => {
-                                suggestions_state = SuggestionsState::Open;
+                    _ => {
+                        if let Some(suggestions_key) = suggestions_key {
+                            let items = suggestion_items(&board);
+                            let (next, effect) = suggestions_state.handle(suggestions_key, &items);
+                            suggestions_state = next;
+                            notice = None;
+                            if let Some(message) = run_effect(effect, &mut board, apply_action) {
+                                notice = Some((message, Instant::now()));
                             }
-                            _ => {
-                                suggestions_state = SuggestionsState::Closed;
-                            }
+                            suggestions = visible_suggestions(&board);
+                            suggestions_state = suggestions_state.synced(&suggestion_items(&board));
+                            draw(
+                                terminal,
+                                &last_snapshot,
+                                &history,
+                                run_state,
+                                logging_state,
+                                alert_active,
+                                &suggestions_state,
+                                &suggestions,
+                                notice_text(&notice),
+                            )?;
                         }
-                        draw(
-                            terminal,
-                            &last_snapshot,
-                            &history,
-                            run_state,
-                            logging_state,
-                            alert_active,
-                            &suggestions_state,
-                            &suggestions,
-                        )?;
                     }
-                    KeyCode::Enter
-                        if suggestions_state == SuggestionsState::Open
-                            && !suggestions.is_empty() =>
-                    {
-                        if suggestions.iter().any(|s| s.action.is_some()) {
-                            suggestions_state = SuggestionsState::Confirming;
-                        }
-                        draw(
-                            terminal,
-                            &last_snapshot,
-                            &history,
-                            run_state,
-                            logging_state,
-                            alert_active,
-                            &suggestions_state,
-                            &suggestions,
-                        )?;
-                    }
-                    KeyCode::Char('y') | KeyCode::Char('Y')
-                        if suggestions_state == SuggestionsState::Confirming
-                            && !suggestions.is_empty() =>
-                    {
-                        if let Some(pos) = suggestions.iter().position(|s| s.action.is_some()) {
-                            let s = suggestions.remove(pos);
-                            if let Some(action) = s.action {
-                                apply_action(&action);
-                            }
-                        }
-                        suggestions_state = SuggestionsState::Open;
-                        draw(
-                            terminal,
-                            &last_snapshot,
-                            &history,
-                            run_state,
-                            logging_state,
-                            alert_active,
-                            &suggestions_state,
-                            &suggestions,
-                        )?;
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N')
-                        if suggestions_state == SuggestionsState::Confirming =>
-                    {
-                        suggestions_state = SuggestionsState::Open;
-                        draw(
-                            terminal,
-                            &last_snapshot,
-                            &history,
-                            run_state,
-                            logging_state,
-                            alert_active,
-                            &suggestions_state,
-                            &suggestions,
-                        )?;
-                    }
-                    _ => {}
                 }
             }
         }
@@ -306,11 +272,74 @@ fn run(
     Ok(())
 }
 
-fn apply_action(action: &powerwatch_core::suggestions::ActionDescriptor) {
-    use powerwatch_core::actions::PowerProfileActionExecutor;
-    if let Err(e) = PowerProfileActionExecutor::for_current_os().apply(&action.kind) {
-        eprintln!("failed to apply action: {e:?}");
+fn visible_suggestions(board: &SuggestionBoard) -> Vec<Suggestion> {
+    board
+        .active()
+        .iter()
+        .map(|a| a.suggestion.clone())
+        .collect()
+}
+
+fn suggestion_items(board: &SuggestionBoard) -> Vec<SuggestionItem> {
+    board
+        .active()
+        .iter()
+        .map(|a| SuggestionItem {
+            id: a.id,
+            has_action: a.suggestion.action.is_some(),
+        })
+        .collect()
+}
+
+fn suggestions_key_for(code: KeyCode, state: SuggestionsState) -> Option<SuggestionsKey> {
+    match code {
+        KeyCode::Char('s') => Some(SuggestionsKey::Toggle),
+        _ if !state.is_open() => None,
+        KeyCode::Down | KeyCode::Char('j') => Some(SuggestionsKey::Next),
+        KeyCode::Up | KeyCode::Char('k') => Some(SuggestionsKey::Previous),
+        KeyCode::Enter => Some(SuggestionsKey::Confirm),
+        KeyCode::Char('y') | KeyCode::Char('Y') => Some(SuggestionsKey::Apply),
+        KeyCode::Char('n') | KeyCode::Char('N') => Some(SuggestionsKey::Cancel),
+        KeyCode::Char('d') | KeyCode::Char('D') => Some(SuggestionsKey::Dismiss),
+        _ => None,
     }
+}
+
+fn apply_action(action: &ActionDescriptor) -> Result<(), String> {
+    use powerwatch_core::actions::{ActionError, PowerProfileActionExecutor};
+    PowerProfileActionExecutor::for_current_os()
+        .apply(&action.kind)
+        .map_err(|e| match e {
+            ActionError::Unsupported(message) | ActionError::ExecutionFailed(message) => message,
+        })
+}
+
+fn run_effect(
+    effect: SuggestionsEffect,
+    board: &mut SuggestionBoard,
+    apply: impl FnOnce(&ActionDescriptor) -> Result<(), String>,
+) -> Option<String> {
+    match effect {
+        SuggestionsEffect::Nothing => None,
+        SuggestionsEffect::Dismiss(id) => {
+            board.dismiss(id);
+            None
+        }
+        SuggestionsEffect::Apply(id) => {
+            let action = board.get(id).and_then(|a| a.suggestion.action.clone())?;
+            match apply(&action) {
+                Ok(()) => {
+                    board.dismiss(id);
+                    Some(format!("Applied: {}", action.label))
+                }
+                Err(error) => Some(format!("Failed: {error}")),
+            }
+        }
+    }
+}
+
+fn notice_text(notice: &Option<(String, Instant)>) -> Option<&str> {
+    notice.as_ref().map(|(text, _)| text.as_str())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -323,6 +352,7 @@ fn draw(
     alert_active: bool,
     suggestions_state: &SuggestionsState,
     suggestions: &[Suggestion],
+    notice: Option<&str>,
 ) -> io::Result<()> {
     terminal
         .draw(|frame| {
@@ -335,6 +365,7 @@ fn draw(
                 alert_active,
                 suggestions_state,
                 suggestions,
+                notice,
             )
         })
         .map(|_| ())
@@ -348,5 +379,153 @@ fn record_to_storage(storage: &Option<Storage>, snapshot: &powerwatch_core::samp
     }
     if let Some(total) = snapshot.total() {
         let _ = storage.insert_reading(&total);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open() -> SuggestionsState {
+        SuggestionsState::Open { selected: 0 }
+    }
+
+    #[test]
+    fn s_toggles_the_panel_whether_or_not_it_is_open() {
+        assert_eq!(
+            suggestions_key_for(KeyCode::Char('s'), SuggestionsState::Closed),
+            Some(SuggestionsKey::Toggle)
+        );
+        assert_eq!(
+            suggestions_key_for(KeyCode::Char('s'), open()),
+            Some(SuggestionsKey::Toggle)
+        );
+    }
+
+    #[test]
+    fn panel_keys_do_nothing_while_the_panel_is_closed() {
+        for code in [
+            KeyCode::Char('d'),
+            KeyCode::Char('y'),
+            KeyCode::Char('n'),
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Enter,
+        ] {
+            assert_eq!(suggestions_key_for(code, SuggestionsState::Closed), None);
+        }
+    }
+
+    #[test]
+    fn open_panel_keys_map_to_their_actions() {
+        let cases = [
+            (KeyCode::Down, SuggestionsKey::Next),
+            (KeyCode::Char('j'), SuggestionsKey::Next),
+            (KeyCode::Up, SuggestionsKey::Previous),
+            (KeyCode::Char('k'), SuggestionsKey::Previous),
+            (KeyCode::Enter, SuggestionsKey::Confirm),
+            (KeyCode::Char('y'), SuggestionsKey::Apply),
+            (KeyCode::Char('Y'), SuggestionsKey::Apply),
+            (KeyCode::Char('n'), SuggestionsKey::Cancel),
+            (KeyCode::Char('N'), SuggestionsKey::Cancel),
+            (KeyCode::Char('d'), SuggestionsKey::Dismiss),
+            (KeyCode::Char('D'), SuggestionsKey::Dismiss),
+        ];
+
+        for (code, expected) in cases {
+            assert_eq!(suggestions_key_for(code, open()), Some(expected));
+        }
+    }
+
+    #[test]
+    fn other_keys_are_left_to_the_rest_of_the_app() {
+        for code in [KeyCode::Char('q'), KeyCode::Char('p'), KeyCode::Char('l')] {
+            assert_eq!(suggestions_key_for(code, open()), None);
+        }
+    }
+
+    fn board_with_one_suggestion() -> (SuggestionBoard, u64) {
+        use chrono::Utc;
+        use powerwatch_core::model::{Component, Confidence, SensorReading};
+        use powerwatch_core::sampler::Snapshot;
+        use powerwatch_core::suggestions::Severity;
+
+        let mut board = SuggestionBoard::new(vec![SuggestionRule {
+            component_name: "cpu".to_string(),
+            threshold_watts: 1.0,
+            sustained_for: Duration::ZERO,
+            message: "high".to_string(),
+            severity: Severity::Info,
+            action: Some(ActionDescriptor {
+                label: "Switch to power saver".to_string(),
+                kind: ActionKind::SetPowerProfile(PowerProfile::PowerSaver),
+            }),
+        }]);
+        let snapshot = Snapshot {
+            timestamp: Utc::now(),
+            results: vec![(
+                "cpu".to_string(),
+                Ok(SensorReading {
+                    component: Component::Cpu,
+                    watts: 40.0,
+                    confidence: Confidence::Measured,
+                    timestamp: Utc::now(),
+                }),
+            )],
+        };
+        board.update_at(&snapshot, Instant::now());
+        let id = board.active()[0].id;
+        (board, id)
+    }
+
+    #[test]
+    fn a_failed_action_keeps_the_suggestion_and_says_why() {
+        let (mut board, id) = board_with_one_suggestion();
+
+        let notice = run_effect(SuggestionsEffect::Apply(id), &mut board, |_| {
+            Err("powerprofilesctl is missing".to_string())
+        });
+
+        assert_eq!(
+            notice.as_deref(),
+            Some("Failed: powerprofilesctl is missing")
+        );
+        assert_eq!(board.active().len(), 1);
+    }
+
+    #[test]
+    fn a_successful_action_removes_the_suggestion_and_says_so() {
+        let (mut board, id) = board_with_one_suggestion();
+
+        let notice = run_effect(SuggestionsEffect::Apply(id), &mut board, |_| Ok(()));
+
+        assert_eq!(notice.as_deref(), Some("Applied: Switch to power saver"));
+        assert!(board.active().is_empty());
+    }
+
+    #[test]
+    fn dismissing_removes_the_suggestion_without_running_anything() {
+        let (mut board, id) = board_with_one_suggestion();
+
+        let notice = run_effect(SuggestionsEffect::Dismiss(id), &mut board, |_| {
+            panic!("dismissing must not run an action")
+        });
+
+        assert_eq!(notice, None);
+        assert!(board.active().is_empty());
+    }
+
+    #[test]
+    fn applying_a_suggestion_that_is_gone_runs_nothing() {
+        let (mut board, id) = board_with_one_suggestion();
+        board.dismiss(id);
+
+        let notice = run_effect(SuggestionsEffect::Apply(id), &mut board, |_| {
+            panic!("a missing suggestion must not run an action")
+        });
+
+        assert_eq!(notice, None);
     }
 }

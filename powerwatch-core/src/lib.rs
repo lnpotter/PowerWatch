@@ -9,4 +9,5 @@ pub mod runtime;
 pub mod sampler;
 pub mod sensors;
 pub mod storage;
+pub mod suggestion_board;
 pub mod suggestions;

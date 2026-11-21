@@ -67,20 +67,40 @@ impl SuggestionEngine {
     }
 
     pub fn evaluate_at(&mut self, snapshot: &Snapshot, now: Instant) -> Vec<Suggestion> {
-        let mut suggestions = Vec::new();
+        self.evaluate_rules_at(snapshot, now)
+            .into_iter()
+            .map(|(_, suggestion)| suggestion)
+            .collect()
+    }
 
-        for (rule, evaluator) in &mut self.rules {
+    pub fn evaluate_rules_at(
+        &mut self,
+        snapshot: &Snapshot,
+        now: Instant,
+    ) -> Vec<(usize, Suggestion)> {
+        let mut fired = Vec::new();
+
+        for (index, (rule, evaluator)) in self.rules.iter_mut().enumerate() {
             if evaluator.evaluate_at(snapshot, now) {
-                suggestions.push(Suggestion {
-                    message: rule.message.clone(),
-                    component_name: rule.component_name.clone(),
-                    severity: rule.severity,
-                    action: rule.action.clone(),
-                });
+                fired.push((
+                    index,
+                    Suggestion {
+                        message: rule.message.clone(),
+                        component_name: rule.component_name.clone(),
+                        severity: rule.severity,
+                        action: rule.action.clone(),
+                    },
+                ));
             }
         }
 
-        suggestions
+        fired
+    }
+
+    pub fn is_rule_active(&self, index: usize) -> bool {
+        self.rules
+            .get(index)
+            .is_some_and(|(_, evaluator)| evaluator.is_active())
     }
 }
 

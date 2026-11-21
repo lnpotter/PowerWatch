@@ -179,6 +179,24 @@
     color: var(--muted);
     font-family: monospace;
   }
+  .suggestion-header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .dismiss-btn {
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.9rem;
+    line-height: 1;
+    padding: 2px 4px;
+    cursor: pointer;
+  }
+  .dismiss-btn:hover {
+    color: var(--text);
+  }
 
   /* Modal overlay */
   .modal-overlay {
@@ -516,12 +534,28 @@ function renderSuggestions(proposals) {
     card.innerHTML = `
       <div class="suggestion-header">
         <span class="suggestion-message">${s.message}</span>
-        <span class="suggestion-severity ${s.severity.toLowerCase()}">${severityLabel}</span>
+        <span class="suggestion-header-right">
+          <span class="suggestion-severity ${s.severity.toLowerCase()}">${severityLabel}</span>
+          <button class="dismiss-btn" title="Dismiss" aria-label="Dismiss suggestion" onclick="dismissSuggestion(${proposal.id})">✕</button>
+        </span>
       </div>
       ${actionHTML}
     `;
     container.appendChild(card);
   }
+}
+
+async function dismissSuggestion(id) {
+  try {
+    await fetch("/api/suggestions/dismiss", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+  } catch (err) {
+
+  }
+  refreshSuggestions();
 }
 
 let pendingApplyToken = null;
@@ -861,7 +895,7 @@ refreshHistory();
 refreshSuggestions();
 setInterval(refreshSnapshot, 1500);
 setInterval(refreshHistory, 5000);
-setInterval(refreshSuggestions, 5000);
+setInterval(refreshSuggestions, 2000);
 </script>
 </body>
 </html>

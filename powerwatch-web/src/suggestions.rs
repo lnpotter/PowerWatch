@@ -1,7 +1,8 @@
 use powerwatch_core::actions::{ActionError, PowerProfileActionExecutor};
 use powerwatch_core::sampler::Snapshot;
+use powerwatch_core::suggestion_board::SuggestionBoard;
 use powerwatch_core::suggestions::{
-    ActionDescriptor, ActionKind, PowerProfile, Severity, Suggestion,
+    ActionDescriptor, ActionKind, PowerProfile, Severity, Suggestion, SuggestionRule,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -12,63 +13,69 @@ use std::time::{Duration, Instant};
 const TOKEN_TTL: Duration = Duration::from_secs(60);
 
 struct IssuedToken {
-    component_name: String,
+    suggestion_id: u64,
     issued: Instant,
 }
 
 #[derive(Clone)]
 pub struct SuggestionsState {
-    pub engine: Arc<Mutex<SuggestionEngine>>,
-    pub active: Arc<Mutex<Vec<Suggestion>>>,
+    board: Arc<Mutex<SuggestionBoard>>,
     tokens: Arc<Mutex<HashMap<String, IssuedToken>>>,
 }
 
 impl SuggestionsState {
     pub fn new() -> Self {
+        Self::with_rules(default_rules())
+    }
+
+    pub(crate) fn with_rules(rules: Vec<SuggestionRule>) -> Self {
         Self {
-            engine: Arc::new(Mutex::new(SuggestionEngine::default())),
-            active: Arc::new(Mutex::new(Vec::new())),
+            board: Arc::new(Mutex::new(SuggestionBoard::new(rules))),
             tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn evaluate(&self, snapshot: &Snapshot) {
-        let mut engine = self.engine.lock().unwrap();
-        let new_suggestions = engine.evaluate(snapshot);
-        drop(engine);
+        self.evaluate_at(snapshot, Instant::now(), detect_current_profile);
+    }
 
-        let mut active = self.active.lock().unwrap();
-        active.retain(|s| {
-            !new_suggestions
-                .iter()
-                .any(|ns| ns.component_name == s.component_name)
-        });
-
-        for s in new_suggestions {
-            active.push(s);
-        }
+    pub(crate) fn evaluate_at(
+        &self,
+        snapshot: &Snapshot,
+        now: Instant,
+        current_profile: impl Fn() -> Option<PowerProfile>,
+    ) {
+        self.board
+            .lock()
+            .unwrap()
+            .update_at_filtered(snapshot, now, |suggestion| {
+                !is_redundant(suggestion, &current_profile)
+            });
     }
 
     pub fn list_with_tokens(&self) -> Vec<Proposal> {
-        let active = self.active.lock().unwrap();
+        let board = self.board.lock().unwrap();
         let mut tokens = self.tokens.lock().unwrap();
         let now = Instant::now();
-        tokens.retain(|_, t| now.duration_since(t.issued) < TOKEN_TTL);
+        tokens.retain(|_, t| {
+            now.duration_since(t.issued) < TOKEN_TTL && board.get(t.suggestion_id).is_some()
+        });
 
-        active
+        board
+            .active()
             .iter()
-            .map(|s| {
-                let token = s.action.as_ref().map(|_| {
+            .map(|active| {
+                let token = active.suggestion.action.as_ref().map(|_| {
                     let existing = tokens
                         .iter()
-                        .find(|(_, t)| t.component_name == s.component_name)
+                        .find(|(_, t)| t.suggestion_id == active.id)
                         .map(|(token, _)| token.clone());
                     existing.unwrap_or_else(|| {
                         let token = new_token();
                         tokens.insert(
                             token.clone(),
                             IssuedToken {
-                                component_name: s.component_name.clone(),
+                                suggestion_id: active.id,
                                 issued: now,
                             },
                         );
@@ -76,7 +83,8 @@ impl SuggestionsState {
                     })
                 });
                 Proposal {
-                    suggestion: s.clone(),
+                    id: active.id,
+                    suggestion: active.suggestion.clone(),
                     token,
                 }
             })
@@ -103,22 +111,75 @@ impl SuggestionsState {
         }
 
         let action = self
-            .active
+            .board
             .lock()
             .unwrap()
-            .iter()
-            .find(|s| s.component_name == issued.component_name)
-            .and_then(|s| s.action.clone())
+            .get(issued.suggestion_id)
+            .and_then(|active| active.suggestion.action.clone())
             .ok_or_else(|| "suggestion is no longer active".to_string())?;
 
         run(&action)?;
 
-        self.active
-            .lock()
-            .unwrap()
-            .retain(|s| s.component_name != issued.component_name);
+        self.board.lock().unwrap().dismiss(issued.suggestion_id);
         Ok(true)
     }
+
+    pub fn dismiss(&self, id: u64) -> bool {
+        self.board.lock().unwrap().dismiss(id)
+    }
+}
+
+fn is_redundant(
+    suggestion: &Suggestion,
+    current_profile: &impl Fn() -> Option<PowerProfile>,
+) -> bool {
+    match suggestion.action.as_ref().map(|action| &action.kind) {
+        Some(ActionKind::SetPowerProfile(target)) => current_profile() == Some(*target),
+        _ => false,
+    }
+}
+
+fn default_rules() -> Vec<SuggestionRule> {
+    let power_saver = || {
+        Some(ActionDescriptor {
+            label: "Switch to power saver".to_string(),
+            kind: ActionKind::SetPowerProfile(PowerProfile::PowerSaver),
+        })
+    };
+
+    vec![
+        SuggestionRule {
+            component_name: "total".to_string(),
+            threshold_watts: 15.0,
+            sustained_for: Duration::from_secs(3),
+            message: "Total power draw has been high. Consider switching to power saver profile."
+                .to_string(),
+            severity: Severity::Warning,
+            action: power_saver(),
+        },
+        SuggestionRule {
+            component_name: "cpu".to_string(),
+            threshold_watts: 8.0,
+            sustained_for: Duration::from_secs(3),
+            message:
+                "CPU power draw has been high. Consider reducing workload or switching to power saver."
+                    .to_string(),
+            severity: Severity::Warning,
+            action: power_saver(),
+        },
+        SuggestionRule {
+            component_name: "cpu".to_string(),
+            threshold_watts: 8.0,
+            sustained_for: Duration::from_secs(10),
+            message: "CPU usage has been high for a while. Review top processes to identify what's consuming resources."
+                .to_string(),
+            severity: Severity::Info,
+            action: Some(ActionDescriptor {
+                label: "Show top processes".to_string(),
+                kind: ActionKind::ShowTopProcesses,
+            }),
+        },
+    ]
 }
 
 fn new_token() -> String {
@@ -131,6 +192,7 @@ fn new_token() -> String {
 
 #[derive(Serialize)]
 pub struct Proposal {
+    pub id: u64,
     pub suggestion: Suggestion,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
@@ -139,6 +201,11 @@ pub struct Proposal {
 #[derive(Deserialize)]
 pub struct ApplyRequest {
     pub token: String,
+}
+
+#[derive(Deserialize)]
+pub struct DismissRequest {
+    pub id: u64,
 }
 
 #[derive(Serialize)]
@@ -155,105 +222,33 @@ fn apply_action(action: &ActionDescriptor) -> Result<(), String> {
         })
 }
 
-#[derive(Default)]
-pub struct SuggestionEngine {
-    fired: std::collections::HashMap<String, (f64, Instant)>,
-}
-
-impl SuggestionEngine {
-    pub fn evaluate(&mut self, snapshot: &Snapshot) -> Vec<Suggestion> {
-        let mut suggestions = Vec::new();
-        let now = Instant::now();
-        let current_profile = detect_current_profile();
-
-        if let Some(total) = snapshot.total() {
-            if total.watts > 15.0 {
-                let key = "total_high".to_string();
-                let entry = self.fired.entry(key.clone()).or_insert((0.0, now));
-                if entry.0 < 15.0 {
-                    entry.0 = total.watts;
-                    entry.1 = now;
-                } else if now.duration_since(entry.1) >= Duration::from_secs(3) {
-                    if current_profile != Some(PowerProfile::PowerSaver) {
-                        suggestions.push(Suggestion {
-                            message: "Total power draw has been high. Consider switching to power saver profile.".to_string(),
-                            component_name: "total".to_string(),
-                            severity: Severity::Warning,
-                            action: Some(ActionDescriptor {
-                                label: "Switch to power saver".to_string(),
-                                kind: ActionKind::SetPowerProfile(PowerProfile::PowerSaver),
-                            }),
-                        });
-                    }
-                    self.fired.remove(&key);
-                }
-            } else {
-                self.fired.remove("total_high");
-            }
-        }
-
-        if let Some(cpu_reading) = snapshot
-            .results
-            .iter()
-            .find(|(name, _)| name == "cpu")
-            .and_then(|(_, r)| r.as_ref().ok())
-        {
-            if cpu_reading.watts > 8.0 {
-                let key = "cpu_high".to_string();
-                let entry = self.fired.entry(key.clone()).or_insert((0.0, now));
-                if entry.0 < 8.0 {
-                    entry.0 = cpu_reading.watts;
-                    entry.1 = now;
-                } else if now.duration_since(entry.1) >= Duration::from_secs(3) {
-                    if current_profile != Some(PowerProfile::PowerSaver) {
-                        suggestions.push(Suggestion {
-                            message: "CPU power draw has been high. Consider reducing workload or switching to power saver.".to_string(),
-                            component_name: "cpu".to_string(),
-                            severity: Severity::Warning,
-                            action: Some(ActionDescriptor {
-                                label: "Switch to power saver".to_string(),
-                                kind: ActionKind::SetPowerProfile(PowerProfile::PowerSaver),
-                            }),
-                        });
-                    }
-                    self.fired.remove(&key);
-                }
-            } else {
-                self.fired.remove("cpu_high");
-            }
-        }
-
-        if let Some(cpu_reading) = snapshot
-            .results
-            .iter()
-            .find(|(name, _)| name == "cpu")
-            .and_then(|(_, r)| r.as_ref().ok())
-        {
-            if cpu_reading.watts > 8.0 {
-                let key = "cpu_high_info".to_string();
-                let entry = self.fired.entry(key.clone()).or_insert((0.0, now));
-                if entry.0 < 8.0 {
-                    entry.0 = cpu_reading.watts;
-                    entry.1 = now;
-                } else if now.duration_since(entry.1) >= Duration::from_secs(10) {
-                    suggestions.push(Suggestion {
-                        message: "CPU usage has been high for a while. Review top processes to identify what's consuming resources.".to_string(),
-                        component_name: "cpu".to_string(),
-                        severity: Severity::Info,
-                        action: Some(ActionDescriptor {
-                            label: "Show top processes".to_string(),
-                            kind: ActionKind::ShowTopProcesses,
-                        }),
-                    });
-                    self.fired.remove(&key);
-                }
-            } else {
-                self.fired.remove("cpu_high_info");
-            }
-        }
-
-        suggestions
-    }
+#[cfg(test)]
+pub(crate) fn state_with_one_active_suggestion() -> SuggestionsState {
+    let state = SuggestionsState::with_rules(vec![SuggestionRule {
+        component_name: "cpu".to_string(),
+        threshold_watts: 1.0,
+        sustained_for: Duration::ZERO,
+        message: "high".to_string(),
+        severity: Severity::Info,
+        action: Some(ActionDescriptor {
+            label: "Show top processes".to_string(),
+            kind: ActionKind::ShowTopProcesses,
+        }),
+    }]);
+    let snapshot = Snapshot {
+        timestamp: chrono::Utc::now(),
+        results: vec![(
+            "cpu".to_string(),
+            Ok(powerwatch_core::model::SensorReading {
+                component: powerwatch_core::model::Component::Cpu,
+                watts: 40.0,
+                confidence: powerwatch_core::model::Confidence::Measured,
+                timestamp: chrono::Utc::now(),
+            }),
+        )],
+    };
+    state.evaluate_at(&snapshot, Instant::now(), || None);
+    state
 }
 
 fn detect_current_profile() -> Option<PowerProfile> {
@@ -342,61 +337,70 @@ mod tests {
         }
     }
 
-    #[test]
-    fn suggestion_engine_fires_when_threshold_sustained() {
-        let mut engine = SuggestionEngine::default();
-
-        // below threshold
-        let suggestions = engine.evaluate(&snapshot_with("cpu", 10.0));
-        assert!(suggestions.is_empty());
-
-        // cross threshold
-        let suggestions = engine.evaluate(&snapshot_with("cpu", 40.0));
-        assert!(suggestions.is_empty()); // not yet sustained
-    }
-
-    #[test]
-    fn suggestions_state_lists_with_tokens() {
-        let state = SuggestionsState::new();
-        let suggestions = state.list_with_tokens();
-        assert!(suggestions.is_empty());
-    }
-
-    fn suggestion(component: &str) -> Suggestion {
-        Suggestion {
-            message: component.to_string(),
+    fn rule(component: &str, threshold: f64, label: &str) -> SuggestionRule {
+        SuggestionRule {
             component_name: component.to_string(),
+            threshold_watts: threshold,
+            sustained_for: Duration::ZERO,
+            message: label.to_string(),
             severity: Severity::Info,
             action: Some(ActionDescriptor {
-                label: component.to_string(),
+                label: label.to_string(),
                 kind: ActionKind::ShowTopProcesses,
             }),
         }
     }
 
-    fn state_with(components: &[&str]) -> SuggestionsState {
-        let state = SuggestionsState::new();
-        *state.active.lock().unwrap() = components.iter().map(|c| suggestion(c)).collect();
-        state
+    fn tick(state: &SuggestionsState, watts: f64) {
+        state.evaluate_at(&snapshot_with("cpu", watts), Instant::now(), || None);
     }
 
-    fn token_for(state: &SuggestionsState, component: &str) -> String {
+    fn messages(state: &SuggestionsState) -> Vec<String> {
         state
             .list_with_tokens()
             .into_iter()
-            .find(|p| p.suggestion.component_name == component)
+            .map(|p| p.suggestion.message)
+            .collect()
+    }
+
+    fn token_for(state: &SuggestionsState, message: &str) -> String {
+        state
+            .list_with_tokens()
+            .into_iter()
+            .find(|p| p.suggestion.message == message)
             .and_then(|p| p.token)
             .unwrap()
     }
 
-    fn remaining(state: &SuggestionsState) -> Vec<String> {
-        let active = state.active.lock().unwrap();
-        active.iter().map(|s| s.component_name.clone()).collect()
+    #[test]
+    fn the_default_rules_match_the_documented_thresholds() {
+        let rules: Vec<_> = default_rules()
+            .into_iter()
+            .map(|r| (r.component_name, r.threshold_watts, r.sustained_for))
+            .collect();
+
+        assert_eq!(
+            rules,
+            vec![
+                ("total".to_string(), 15.0, Duration::from_secs(3)),
+                ("cpu".to_string(), 8.0, Duration::from_secs(3)),
+                ("cpu".to_string(), 8.0, Duration::from_secs(10)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_state_has_no_suggestions() {
+        assert!(SuggestionsState::new().list_with_tokens().is_empty());
     }
 
     #[test]
     fn a_token_applies_only_its_own_suggestion() {
-        let state = state_with(&["cpu", "total"]);
+        let state = SuggestionsState::with_rules(vec![
+            rule("cpu", 10.0, "cpu"),
+            rule("total", 10.0, "total"),
+        ]);
+        tick(&state, 40.0);
         let token = token_for(&state, "total");
         let mut ran = Vec::new();
 
@@ -408,23 +412,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(ran, vec!["total"]);
-        assert_eq!(remaining(&state), vec!["cpu"]);
+        assert_eq!(messages(&state), vec!["cpu"]);
     }
 
     #[test]
     fn a_failed_action_is_reported_and_the_suggestion_stays() {
-        let state = state_with(&["cpu"]);
+        let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
+        tick(&state, 40.0);
         let token = token_for(&state, "cpu");
 
         let result = state.apply_with(&token, |_| Err("powerprofilesctl not found".to_string()));
 
         assert_eq!(result, Err("powerprofilesctl not found".to_string()));
-        assert_eq!(remaining(&state), vec!["cpu"]);
+        assert_eq!(messages(&state), vec!["cpu"]);
     }
 
     #[test]
     fn a_token_works_only_once() {
-        let state = state_with(&["cpu"]);
+        let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
+        tick(&state, 40.0);
         let token = token_for(&state, "cpu");
 
         assert!(state.apply_with(&token, |_| Ok(())).is_ok());
@@ -433,7 +439,8 @@ mod tests {
 
     #[test]
     fn an_unknown_token_runs_nothing() {
-        let state = state_with(&["cpu"]);
+        let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
+        tick(&state, 40.0);
         let mut ran = false;
 
         let result = state.apply_with("made-up", |_| {
@@ -446,10 +453,11 @@ mod tests {
     }
 
     #[test]
-    fn a_token_for_a_suggestion_that_is_gone_runs_nothing() {
-        let state = state_with(&["cpu"]);
+    fn a_token_for_a_suggestion_whose_load_dropped_runs_nothing() {
+        let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
+        tick(&state, 40.0);
         let token = token_for(&state, "cpu");
-        state.active.lock().unwrap().clear();
+        tick(&state, 1.0);
         let mut ran = false;
 
         let result = state.apply_with(&token, |_| {
@@ -462,14 +470,141 @@ mod tests {
     }
 
     #[test]
+    fn a_token_for_a_dismissed_suggestion_runs_nothing() {
+        let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
+        tick(&state, 40.0);
+        let proposal = state.list_with_tokens().remove(0);
+        let mut ran = false;
+
+        assert!(state.dismiss(proposal.id));
+        let result = state.apply_with(&proposal.token.unwrap(), |_| {
+            ran = true;
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        assert!(!ran);
+    }
+
+    #[test]
     fn listing_again_reuses_the_token_instead_of_issuing_new_ones() {
-        let state = state_with(&["cpu"]);
+        let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
+        tick(&state, 40.0);
 
         let first = token_for(&state, "cpu");
         let second = token_for(&state, "cpu");
 
         assert_eq!(first, second);
         assert_eq!(state.tokens.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn tokens_of_suggestions_that_went_away_are_dropped() {
+        let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
+        tick(&state, 40.0);
+        token_for(&state, "cpu");
+
+        tick(&state, 1.0);
+        state.list_with_tokens();
+
+        assert!(state.tokens.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_suggestion_goes_away_when_the_load_drops() {
+        let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
+
+        tick(&state, 40.0);
+        assert_eq!(messages(&state), vec!["cpu"]);
+
+        tick(&state, 1.0);
+        assert!(messages(&state).is_empty());
+    }
+
+    #[test]
+    fn a_dismissed_suggestion_stays_gone_until_the_next_excursion() {
+        let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
+        tick(&state, 40.0);
+        let id = state.list_with_tokens()[0].id;
+
+        assert!(state.dismiss(id));
+        tick(&state, 40.0);
+        assert!(messages(&state).is_empty());
+
+        tick(&state, 1.0);
+        tick(&state, 40.0);
+        let again = state.list_with_tokens();
+        assert_eq!(again.len(), 1);
+        assert_ne!(again[0].id, id);
+    }
+
+    #[test]
+    fn dismissing_an_unknown_id_returns_false() {
+        let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "cpu")]);
+        tick(&state, 40.0);
+
+        assert!(!state.dismiss(99));
+        assert_eq!(messages(&state), vec!["cpu"]);
+    }
+
+    #[test]
+    fn suggestions_for_the_same_component_do_not_replace_each_other() {
+        let state = SuggestionsState::with_rules(vec![
+            rule("cpu", 10.0, "mild"),
+            rule("cpu", 30.0, "severe"),
+        ]);
+
+        tick(&state, 40.0);
+
+        assert_eq!(messages(&state), vec!["mild", "severe"]);
+    }
+
+    #[test]
+    fn each_suggestion_is_listed_with_its_own_id() {
+        let state = SuggestionsState::with_rules(vec![
+            rule("cpu", 10.0, "mild"),
+            rule("cpu", 30.0, "severe"),
+        ]);
+        tick(&state, 40.0);
+
+        let ids: Vec<u64> = state.list_with_tokens().iter().map(|p| p.id).collect();
+
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn a_power_profile_suggestion_is_skipped_when_already_in_that_profile() {
+        let power_saver_rule = || SuggestionRule {
+            action: Some(ActionDescriptor {
+                label: "Switch to power saver".to_string(),
+                kind: ActionKind::SetPowerProfile(PowerProfile::PowerSaver),
+            }),
+            ..rule("cpu", 10.0, "saver")
+        };
+        let snapshot = snapshot_with("cpu", 40.0);
+
+        let already = SuggestionsState::with_rules(vec![power_saver_rule()]);
+        already.evaluate_at(&snapshot, Instant::now(), || Some(PowerProfile::PowerSaver));
+        assert!(already.list_with_tokens().is_empty());
+
+        let balanced = SuggestionsState::with_rules(vec![power_saver_rule()]);
+        balanced.evaluate_at(&snapshot, Instant::now(), || Some(PowerProfile::Balanced));
+        assert_eq!(balanced.list_with_tokens().len(), 1);
+
+        let unknown = SuggestionsState::with_rules(vec![power_saver_rule()]);
+        unknown.evaluate_at(&snapshot, Instant::now(), || None);
+        assert_eq!(unknown.list_with_tokens().len(), 1);
+    }
+
+    #[test]
+    fn the_current_profile_is_not_looked_up_for_suggestions_without_a_profile_action() {
+        let state = SuggestionsState::with_rules(vec![rule("cpu", 10.0, "info")]);
+
+        state.evaluate_at(&snapshot_with("cpu", 40.0), Instant::now(), || {
+            panic!("the profile must not be detected for this suggestion")
+        });
+
+        assert_eq!(messages(&state), vec!["info"]);
     }
 
     #[test]

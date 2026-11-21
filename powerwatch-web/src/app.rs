@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use crate::suggestions::{ApplyRequest, ApplyResponse, Proposal};
+use crate::suggestions::{ApplyRequest, ApplyResponse, DismissRequest, Proposal};
 use axum::extract::{Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse};
@@ -45,6 +45,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/history", get(history))
         .route("/api/suggestions", get(suggestions_list))
         .route("/api/suggestions/apply", post(suggestions_apply))
+        .route("/api/suggestions/dismiss", post(suggestions_dismiss))
         .route("/api/processes/top", get(top_processes))
         .with_state(state)
         .layer(axum::extract::DefaultBodyLimit::max(4 * 1024)) // small payloads only
@@ -123,6 +124,17 @@ async fn suggestions_apply(
             "suggestion was already applied".to_string(),
         )),
         Err(e) => Err((StatusCode::BAD_REQUEST, e)),
+    }
+}
+
+async fn suggestions_dismiss(
+    State(state): State<AppState>,
+    Json(req): Json<DismissRequest>,
+) -> StatusCode {
+    if state.suggestions.dismiss(req.id) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
     }
 }
 
@@ -458,6 +470,70 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn dismissing_an_unknown_suggestion_is_not_found() {
+        let state = test_state_with(empty_snapshot());
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/suggestions/dismiss")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"id":99}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn dismissing_a_suggestion_removes_it_from_the_list() {
+        let mut state = test_state_with(empty_snapshot());
+        state.suggestions = crate::suggestions::state_with_one_active_suggestion();
+        let app = build_router(state);
+
+        let list = |app: Router| async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/suggestions")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+
+        let before = list(app.clone()).await;
+        assert_eq!(before.as_array().unwrap().len(), 1);
+        let id = before[0]["id"].as_u64().unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/suggestions/dismiss")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"id":{id}}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let after = list(app).await;
+        assert!(after.as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

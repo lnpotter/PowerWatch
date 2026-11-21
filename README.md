@@ -141,13 +141,13 @@ The TUI can evaluate power-draw patterns and surface energy-saving suggestions. 
 
 | Key | Action |
 |-----|--------|
-| `s` | Toggle suggestions panel |
-| `Enter` | Confirm the first actionable suggestion |
+| `Up` / `Down` (or `k` / `j`) | Move the selection |
+| `Enter` | Confirm the selected suggestion's action |
 | `y` / `Y` | Apply the action being confirmed |
 | `n` / `N` | Cancel the confirmation (the suggestion stays in the list) |
-| `s` again | Close the panel |
+| `d` / `D` | Dismiss the selected suggestion |
 
-Nothing runs on its own: press `Enter` to open the confirmation, then `y` to apply it. The TUI has two rules, total draw above 75 W or CPU draw above 30 W for 3 seconds, and both propose switching to the power saver profile. The one-time confirmation token belongs to the web dashboard (see below).
+Nothing runs on its own: press `Enter` to open the confirmation, then `y` to apply it. The TUI has two rules, total draw above 15 W or CPU draw above 8 W for 3 seconds, and both propose switching to the power saver profile. The one-time confirmation token belongs to the web dashboard (see below).
 
 ## Web Dashboard
 
@@ -170,11 +170,12 @@ A local HTTP server with a single self-contained HTML page: no separate assets, 
 API endpoints:
 
 ```
-GET  /api/snapshot           # latest power readings as JSON
-GET  /api/history?since=10m  # readings since a given timestamp
-GET  /api/suggestions        # active energy-saving suggestions
-POST /api/suggestions/apply  # apply an action (requires token)
-GET  /api/processes/top      # top 5 CPU-consuming processes
+GET  /api/snapshot            # latest power readings as JSON
+GET  /api/history?since=10m   # readings since a given timestamp
+GET  /api/suggestions         # active energy-saving suggestions
+POST /api/suggestions/apply   # apply an action (requires token)
+GET  /api/processes/top       # top 5 CPU-consuming processes
+POST /api/suggestions/dismiss # dismiss a suggestion by id
 ```
 
 This is intended for your own machine only, there is no authentication or HTTPS. It's not recommended to expose it on a network.
@@ -187,7 +188,7 @@ PowerWatch can detect sustained high power draw and propose actions to reduce it
 
 | Suggestion | Condition (web) | Condition (TUI) | Action | Safety |
 |------------|-----------------|-----------------|--------|--------|
-| **Switch to power saver** | Total > 15W for 3s, or CPU > 8W for 3s | Total > 75W for 3s, or CPU > 30W for 3s | Change power profile to `power-saver` | Modifies system profile |
+| **Switch to power saver** | Total > 15W for 3s, or CPU > 8W for 3s | Total > 15W for 3s, or CPU > 8W for 3s | Change power profile to `power-saver` | Modifies system profile |
 | **Show top processes** | CPU > 8W for 10s | Not available | Display top 5 CPU processes in a modal | Read-only, no system changes |
 
 The web dashboard skips the power saver suggestion when the machine is already in that profile. It reads the current profile with `powerprofilesctl` (Linux), `pmset` (macOS) or `powercfg` (Windows, matched by the scheme's GUID, so localized names work). If the profile can't be detected, for instance with a custom Windows plan or a missing command, the suggestion still appears.
