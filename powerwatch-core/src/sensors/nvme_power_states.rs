@@ -223,7 +223,7 @@ ps    3 : mp:0.0700W non-operational enlat:2000 exlat:2000 rrt:3 rrl:3 rwt:3 rwl
     #[test]
     fn reads_the_current_power_state_number() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        write!(file, "2\n").unwrap();
+        writeln!(file, "2").unwrap();
 
         let state = read_current_power_state(file.path()).unwrap();
 

@@ -36,6 +36,7 @@ fn component_label(component: &powerwatch_core::model::Component) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame,
     snapshot: &Snapshot,

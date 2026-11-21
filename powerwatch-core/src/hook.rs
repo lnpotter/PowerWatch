@@ -6,12 +6,17 @@ pub enum HookError {
 }
 
 pub fn run_hook(command: &str) -> Result<(), HookError> {
-    run_hook_with_shell("sh", command)
+    let (shell, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    run_hook_with_shell(shell, flag, command)
 }
 
-fn run_hook_with_shell(shell: &str, command: &str) -> Result<(), HookError> {
+fn run_hook_with_shell(shell: &str, flag: &str, command: &str) -> Result<(), HookError> {
     let child = Command::new(shell)
-        .arg("-c")
+        .arg(flag)
         .arg(command)
         .spawn()
         .map_err(|e| HookError::SpawnFailed(e.to_string()))?;
@@ -68,7 +73,7 @@ mod tests {
 
     #[test]
     fn a_missing_shell_is_reported_as_a_spawn_failure_not_a_panic() {
-        let result = run_hook_with_shell("/no/such/shell-binary", "echo hi");
+        let result = run_hook_with_shell("/no/such/shell-binary", "-c", "echo hi");
 
         assert!(matches!(result, Err(HookError::SpawnFailed(_))));
     }

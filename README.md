@@ -1,5 +1,7 @@
 # PowerWatch
 
+[![CI](https://github.com/lnpotter/PowerWatch/actions/workflows/ci.yml/badge.svg)](https://github.com/lnpotter/PowerWatch/actions/workflows/ci.yml)
+
 A lightweight, cross-platform tool for measuring and estimating power consumption of PC components in real-time. Provides three interfaces: a CLI for scripts and one-off checks, a terminal dashboard for live monitoring, and a browser-based dashboard with charts and history.
 
 ## Overview
@@ -110,7 +112,7 @@ powerwatch-tui --alert-component cpu --alert-above 20 --alert-for 10s
 | `--alert-above <watts>` | Enable the alert (required) |
 | `--alert-component <name>` | Which sensor to watch (`cpu`, `gpu`, `ram`, `disk`, or `total`) |
 | `--alert-for <duration>` | How long the threshold must be sustained (`10s`, `2m`, default: immediate) |
-| `--alert-run <command>` | Shell command to run once when the alert fires |
+| `--alert-run <command>` | Shell command to run once when the alert fires (`sh -c` on Linux and macOS, `cmd /C` on Windows) |
 
 The alert fires **once per excursion** above the threshold (not once per second) so a hook won't spam you. It can fire again after dropping back below and crossing upward a second time. Without `--alert-run`, the CLI prints `🔔 alert active` each cycle and the TUI shows a red banner.
 

@@ -82,7 +82,7 @@ fn suggestion_engine_fires_on_sustained_total() {
         sustained_for: Duration::from_secs(1), // shortened for test
         message: "Total power high".to_string(),
         severity: Severity::Warning,
-        action: None // informational only
+        action: None, // informational only
     }]);
 
     let t0 = Instant::now();

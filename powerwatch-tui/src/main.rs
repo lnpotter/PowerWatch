@@ -313,6 +313,7 @@ fn apply_action(action: &powerwatch_core::suggestions::ActionDescriptor) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     snapshot: &powerwatch_core::sampler::Snapshot,
