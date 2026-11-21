@@ -71,15 +71,8 @@ fn log_for(sampler: &mut Sampler, storage: &Storage, log_duration: Duration) -> 
     while Instant::now() < deadline {
         let snapshot = sampler.sample_all();
 
-        for reading in snapshot.readings() {
-            if storage.insert_reading(reading).is_ok() {
-                recorded += 1;
-            }
-        }
-        if let Some(total) = snapshot.total() {
-            if storage.insert_reading(&total).is_ok() {
-                recorded += 1;
-            }
+        if let Ok(inserted) = storage.insert_snapshot(&snapshot) {
+            recorded += inserted;
         }
 
         thread::sleep(Duration::from_secs(1));
@@ -166,6 +159,8 @@ fn main() {
                 std::process::exit(1);
             }
         };
+
+        let _ = storage.prune_expired();
 
         println!("logging to {} for {duration_text}...", db_path.display());
         let recorded = log_for(&mut sampler, &storage, log_duration);

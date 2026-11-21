@@ -2,7 +2,9 @@ use powerwatch_core::sampler::{Sampler, Snapshot};
 use powerwatch_core::storage::Storage;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -27,6 +29,8 @@ pub fn start_sampling_loop(
         suggestions: suggestions.clone(),
     };
 
+    let mut last_prune = Instant::now();
+
     thread::spawn(move || loop {
         thread::sleep(interval);
         let snapshot = sampler.sample_all();
@@ -36,11 +40,10 @@ pub fn start_sampling_loop(
         if log_continuously {
             if let Ok(guard) = storage.lock() {
                 if let Some(db) = guard.as_ref() {
-                    for reading in snapshot.readings() {
-                        let _ = db.insert_reading(reading);
-                    }
-                    if let Some(total) = snapshot.total() {
-                        let _ = db.insert_reading(&total);
+                    let _ = db.insert_snapshot(&snapshot);
+                    if last_prune.elapsed() >= PRUNE_INTERVAL {
+                        let _ = db.prune_expired();
+                        last_prune = Instant::now();
                     }
                 }
             }

@@ -228,6 +228,11 @@ fn run(
                     }
                     KeyCode::Char('l') if storage.is_some() => {
                         logging_state = logging_state.toggle();
+                        if logging_state.is_logging() {
+                            if let Some(storage) = &storage {
+                                let _ = storage.prune_expired();
+                            }
+                        }
                         draw(
                             terminal,
                             &last_snapshot,
@@ -374,12 +379,7 @@ fn draw(
 fn record_to_storage(storage: &Option<Storage>, snapshot: &powerwatch_core::sampler::Snapshot) {
     let Some(storage) = storage else { return };
 
-    for reading in snapshot.readings() {
-        let _ = storage.insert_reading(reading);
-    }
-    if let Some(total) = snapshot.total() {
-        let _ = storage.insert_reading(&total);
-    }
+    let _ = storage.insert_snapshot(snapshot);
 }
 
 #[cfg(test)]

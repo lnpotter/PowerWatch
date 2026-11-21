@@ -39,6 +39,11 @@ async fn main() {
         let _ = std::fs::create_dir_all(parent);
     }
     let storage = Storage::open(&db_path).ok();
+    if args.log {
+        if let Some(storage) = &storage {
+            let _ = storage.prune_expired();
+        }
+    }
     if args.log && storage.is_none() {
         eprintln!(
             "warning: --log was passed but the history database at {} couldn't be opened",

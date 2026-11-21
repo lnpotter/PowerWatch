@@ -84,8 +84,12 @@ powerwatch --log --duration 5m
 History lives at `~/.local/share/powerwatch/history.db`. You can inspect it directly:
 
 ```bash
-sqlite3 ~/.local/share/powerwatch/history.db "SELECT * FROM readings ORDER BY timestamp DESC LIMIT 20;"
+sqlite3 ~/.local/share/powerwatch/history.db "SELECT * FROM readings ORDER BY ts DESC LIMIT 20;"
 ```
+
+The database runs in WAL mode, so you will also see `history.db-wal` and `history.db-shm` next to it. That is what lets the CLI, the TUI and the web dashboard write to and read from the same file at once.
+
+Readings older than 7 days are deleted when logging starts (and once an hour while the web dashboard keeps logging), so the file stays bounded: with four series sampled once per second it grows by roughly 30 MB per day. Set `POWERWATCH_RETENTION_DAYS` to change the window, for example `POWERWATCH_RETENTION_DAYS=30`, or to `0` to keep everything.
 
 Query averaged readings from a logged session:
 
@@ -147,7 +151,7 @@ The TUI can evaluate power-draw patterns and surface energy-saving suggestions. 
 | `n` / `N` | Cancel the confirmation (the suggestion stays in the list) |
 | `d` / `D` | Dismiss the selected suggestion |
 
-Nothing runs on its own: press `Enter` to open the confirmation, then `y` to apply it. The TUI has two rules, total draw above 15 W or CPU draw above 8 W for 3 seconds, and both propose switching to the power saver profile. The one-time confirmation token belongs to the web dashboard (see below).
+Nothing runs on its own: select a suggestion, press `Enter` to open the confirmation, then `y` to apply it. If the list changes while you are confirming, `y` only applies the suggestion you confirmed, and does nothing if it has already gone away. If the action fails, the reason is shown in the panel footer and the suggestion stays in the list. The TUI has two rules, total draw above 15 W or CPU draw above 8 W for 3 seconds, and both propose switching to the power saver profile. The one-time confirmation token belongs to the web dashboard (see below).
 
 ## Web Dashboard
 
@@ -183,6 +187,8 @@ This is intended for your own machine only, there is no authentication or HTTPS.
 ## Energy-Saving Suggestions
 
 PowerWatch can detect sustained high power draw and propose actions to reduce it. Every action requires explicit confirmation through a modal dialog with a one-time token; nothing is applied automatically.
+
+A suggestion appears once per excursion above its threshold and goes away on its own as soon as the draw falls back under it. You can also dismiss it (the `✕` button in the web dashboard, `d` in the TUI). A dismissed suggestion stays gone until the draw drops below the threshold and crosses it again.
 
 ### Implemented Suggestions
 
