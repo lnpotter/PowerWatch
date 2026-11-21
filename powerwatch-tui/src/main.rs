@@ -307,17 +307,8 @@ fn run(
 }
 
 fn apply_action(action: &powerwatch_core::suggestions::ActionDescriptor) {
-    use powerwatch_core::actions::{
-        linux_command_for, linux_command_for_sleep_timer, linux_command_for_top_processes,
-        PowerProfileActionExecutor, RealCommandRunner,
-    };
-    let mut executor = PowerProfileActionExecutor::new(
-        RealCommandRunner,
-        linux_command_for,
-        linux_command_for_top_processes,
-        linux_command_for_sleep_timer,
-    );
-    if let Err(e) = executor.apply(&action.kind) {
+    use powerwatch_core::actions::PowerProfileActionExecutor;
+    if let Err(e) = PowerProfileActionExecutor::for_current_os().apply(&action.kind) {
         eprintln!("failed to apply action: {e:?}");
     }
 }

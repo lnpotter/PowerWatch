@@ -60,7 +60,7 @@ pub fn macos_command_for_top_processes() -> (&'static str, Vec<String>) {
         "sh",
         vec![
             "-c".to_string(),
-            "ps -eo pid,pcpu,pmem,rss,comm -m | head -6".to_string(),
+            "ps -eo pid,pcpu,pmem,rss,comm -r | head -6".to_string(),
         ],
     )
 }
@@ -158,6 +158,72 @@ impl<R: CommandRunner> PowerProfileActionExecutor<R> {
                 self.runner.run(program, &args)
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Linux,
+    MacOs,
+    Windows,
+}
+
+impl Platform {
+    pub const fn current() -> Self {
+        if cfg!(target_os = "windows") {
+            Platform::Windows
+        } else if cfg!(target_os = "macos") {
+            Platform::MacOs
+        } else {
+            Platform::Linux
+        }
+    }
+
+    pub fn profile_command(self, profile: PowerProfile) -> (&'static str, Vec<String>) {
+        match self {
+            Platform::Linux => linux_command_for(profile),
+            Platform::MacOs => macos_command_for(profile),
+            Platform::Windows => windows_command_for(profile),
+        }
+    }
+
+    pub fn top_processes_command(self) -> (&'static str, Vec<String>) {
+        match self {
+            Platform::Linux => linux_command_for_top_processes(),
+            Platform::MacOs => macos_command_for_top_processes(),
+            Platform::Windows => windows_command_for_top_processes(),
+        }
+    }
+
+    pub fn sleep_timer_command(self) -> (&'static str, Vec<String>) {
+        match self {
+            Platform::Linux => linux_command_for_sleep_timer(),
+            Platform::MacOs => macos_command_for_sleep_timer(),
+            Platform::Windows => windows_command_for_sleep_timer(),
+        }
+    }
+}
+
+fn profile_command_for_current_os(profile: PowerProfile) -> (&'static str, Vec<String>) {
+    Platform::current().profile_command(profile)
+}
+
+fn top_processes_command_for_current_os() -> (&'static str, Vec<String>) {
+    Platform::current().top_processes_command()
+}
+
+fn sleep_timer_command_for_current_os() -> (&'static str, Vec<String>) {
+    Platform::current().sleep_timer_command()
+}
+
+impl PowerProfileActionExecutor<RealCommandRunner> {
+    pub fn for_current_os() -> Self {
+        Self::new(
+            RealCommandRunner,
+            profile_command_for_current_os,
+            top_processes_command_for_current_os,
+            sleep_timer_command_for_current_os,
+        )
     }
 }
 
@@ -337,7 +403,7 @@ mod tests {
                 "sh",
                 vec![
                     "-c".to_string(),
-                    "ps -eo pid,pcpu,pmem,rss,comm -m | head -6".to_string()
+                    "ps -eo pid,pcpu,pmem,rss,comm -r | head -6".to_string()
                 ]
             )
         );
@@ -351,5 +417,64 @@ mod tests {
                 ],
             )
         );
+    }
+
+    #[test]
+    fn platform_picks_the_commands_of_its_own_os() {
+        let profile = PowerProfile::PowerSaver;
+
+        assert_eq!(
+            Platform::Linux.profile_command(profile),
+            linux_command_for(profile)
+        );
+        assert_eq!(
+            Platform::MacOs.profile_command(profile),
+            macos_command_for(profile)
+        );
+        assert_eq!(
+            Platform::Windows.profile_command(profile),
+            windows_command_for(profile)
+        );
+
+        assert_eq!(
+            Platform::MacOs.top_processes_command(),
+            macos_command_for_top_processes()
+        );
+        assert_eq!(
+            Platform::Windows.top_processes_command(),
+            windows_command_for_top_processes()
+        );
+
+        assert_eq!(
+            Platform::MacOs.sleep_timer_command(),
+            macos_command_for_sleep_timer()
+        );
+        assert_eq!(
+            Platform::Windows.sleep_timer_command(),
+            windows_command_for_sleep_timer()
+        );
+    }
+
+    #[test]
+    fn current_platform_matches_the_build_target() {
+        let expected = if cfg!(target_os = "windows") {
+            Platform::Windows
+        } else if cfg!(target_os = "macos") {
+            Platform::MacOs
+        } else {
+            Platform::Linux
+        };
+        assert_eq!(Platform::current(), expected);
+    }
+
+    #[test]
+    fn the_current_os_commands_use_the_right_program() {
+        let (program, _) = profile_command_for_current_os(PowerProfile::PowerSaver);
+        let expected = match Platform::current() {
+            Platform::Linux => "powerprofilesctl",
+            Platform::MacOs => "pmset",
+            Platform::Windows => "powercfg",
+        };
+        assert_eq!(program, expected);
     }
 }

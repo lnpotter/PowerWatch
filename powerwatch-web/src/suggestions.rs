@@ -1,7 +1,4 @@
-use powerwatch_core::actions::{
-    linux_command_for, linux_command_for_sleep_timer, linux_command_for_top_processes, ActionError,
-    PowerProfileActionExecutor, RealCommandRunner,
-};
+use powerwatch_core::actions::{ActionError, PowerProfileActionExecutor};
 use powerwatch_core::sampler::Snapshot;
 use powerwatch_core::suggestions::{
     ActionDescriptor, ActionKind, PowerProfile, Severity, Suggestion,
@@ -151,15 +148,11 @@ pub struct ApplyResponse {
 }
 
 fn apply_action(action: &ActionDescriptor) -> Result<(), String> {
-    let mut executor = PowerProfileActionExecutor::new(
-        RealCommandRunner,
-        linux_command_for,
-        linux_command_for_top_processes,
-        linux_command_for_sleep_timer,
-    );
-    executor.apply(&action.kind).map_err(|e| match e {
-        ActionError::Unsupported(msg) | ActionError::ExecutionFailed(msg) => msg,
-    })
+    PowerProfileActionExecutor::for_current_os()
+        .apply(&action.kind)
+        .map_err(|e| match e {
+            ActionError::Unsupported(msg) | ActionError::ExecutionFailed(msg) => msg,
+        })
 }
 
 #[derive(Default)]
