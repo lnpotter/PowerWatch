@@ -116,7 +116,7 @@ pub fn discover_nvme_controller(nvme_class_dir: &Path) -> Option<String> {
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs;

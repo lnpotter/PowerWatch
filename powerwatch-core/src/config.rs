@@ -596,9 +596,10 @@ mod tests {
 
     #[test]
     fn the_default_location_follows_xdg_then_home_and_is_optional() {
-        let with_xdg = env(None, Some("/xdg"), Some("/home/me"), None, false);
+        let xdg_dir = std::env::temp_dir().join("xdg");
+        let with_xdg = env(None, xdg_dir.to_str(), Some("/home/me"), None, false);
         let source = resolve_source(None, &with_xdg).unwrap();
-        assert_eq!(source.path, PathBuf::from("/xdg/powerwatch/config.toml"));
+        assert_eq!(source.path, xdg_dir.join("powerwatch").join("config.toml"));
         assert!(!source.required);
 
         let home_only = env(None, None, Some("/home/me"), None, false);

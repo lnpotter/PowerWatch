@@ -9,6 +9,7 @@ use powerwatch_core::json_snapshot::{build_json_snapshot, JsonSnapshot};
 use powerwatch_core::model::SensorReading;
 use serde::Deserialize;
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn convert_rss_to_mb(output: &str) -> String {
     let mut result = String::new();
     for (i, line) in output.lines().enumerate() {
@@ -165,7 +166,7 @@ async fn top_processes() -> Result<Json<serde_json::Value>, (StatusCode, String)
     #[cfg(target_os = "macos")]
     {
         let output = std::process::Command::new("sh")
-            .args(&["-c", "ps -eo pid,pcpu,pmem,rss,comm -m | head -6"])
+            .args(["-c", "ps -eo pid,pcpu,pmem,rss,comm -r | head -6"])
             .output();
 
         match output {
@@ -188,7 +189,7 @@ async fn top_processes() -> Result<Json<serde_json::Value>, (StatusCode, String)
     #[cfg(target_os = "windows")]
     {
         let output = std::process::Command::new("powershell")
-            .args(&["-command", "Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 Id,CPU,WorkingSet,ProcessName | Format-Table -AutoSize"])
+            .args(["-command", "Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 Id,CPU,WorkingSet,ProcessName | Format-Table -AutoSize"])
             .output();
 
         match output {

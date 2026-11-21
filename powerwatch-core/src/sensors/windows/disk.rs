@@ -50,7 +50,7 @@ mod win32 {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::System::Performance::{
         PdhAddCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetRawCounterValue, PdhOpenQueryW,
-        PDH_FMT_COUNTERVALUE, PDH_RAW_COUNTER,
+        PDH_RAW_COUNTER,
     };
 
     fn to_wide(s: &str) -> Vec<u16> {

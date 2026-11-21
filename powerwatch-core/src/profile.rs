@@ -33,7 +33,7 @@ pub fn detect_current_profile() -> Option<PowerProfile> {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
-        if let Ok(output) = Command::new("pmset").args(&["get", "current"]).output() {
+        if let Ok(output) = Command::new("pmset").args(["get", "current"]).output() {
             if output.status.success() {
                 if let Ok(text) = String::from_utf8(output.stdout) {
                     if text.contains("lowpowermode 1") {
