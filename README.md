@@ -25,7 +25,7 @@ On NVMe drives, if `nvme-cli` is installed and the drive is readable, PowerWatch
 
 ## Install
 
-You need a recent Rust toolchain (stable, 1.75+). No system libraries are required: SQLite is bundled, and the NVML binding loads dynamically only when the NVIDIA driver is present.
+You need a recent Rust toolchain (stable, 1.85 or newer). No system libraries are required: SQLite is bundled, and the NVML binding loads dynamically only when the NVIDIA driver is present.
 
 ```bash
 cargo build --workspace --release
