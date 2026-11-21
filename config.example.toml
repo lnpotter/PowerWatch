@@ -1,0 +1,25 @@
+# PowerWatch configuration.
+#
+# Every key is optional; the values below are the defaults. PowerWatch creates
+# this file as config.toml in the project folder the first time it runs. Edit
+# it and restart to change the thresholds. To use a different file, pass
+# --config <path> (or set POWERWATCH_CONFIG).
+
+[suggestions]
+# Seconds a suggestion stays visible after the draw falls back under its
+# threshold. This keeps it from flickering when the draw hovers around the limit.
+clear_after_seconds = 5
+
+# "Switch to power saver": fires when total or CPU draw stays above its
+# threshold for sustained_seconds.
+[suggestions.power_saver]
+enabled = true
+total_watts = 15.0
+cpu_watts = 8.0
+sustained_seconds = 3
+
+# "Show top processes" (web dashboard only).
+[suggestions.top_processes]
+enabled = true
+cpu_watts = 8.0
+sustained_seconds = 10

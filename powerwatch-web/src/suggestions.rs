@@ -1,10 +1,11 @@
 use powerwatch_core::actions::{ActionError, Platform, PowerProfileActionExecutor};
+use powerwatch_core::config::SuggestionsConfig;
 use powerwatch_core::profile::{detect_current_profile, is_redundant};
 use powerwatch_core::sampler::Snapshot;
 use powerwatch_core::suggestion_board::SuggestionBoard;
-use powerwatch_core::suggestions::{
-    ActionDescriptor, ActionKind, PowerProfile, Severity, Suggestion, SuggestionRule,
-};
+use powerwatch_core::suggestions::{ActionDescriptor, PowerProfile, Suggestion};
+#[cfg(test)]
+use powerwatch_core::suggestions::{ActionKind, Severity, SuggestionRule};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -25,13 +26,28 @@ pub struct SuggestionsState {
 }
 
 impl SuggestionsState {
+    #[cfg(test)]
     pub fn new() -> Self {
-        Self::with_rules(default_rules())
+        Self::from_config(&SuggestionsConfig::default())
     }
 
+    pub fn from_config(config: &SuggestionsConfig) -> Self {
+        let mut rules = config.power_saver_rules();
+        rules.extend(config.top_processes_rules());
+        Self::with_board(SuggestionBoard::with_clear_after(
+            rules,
+            config.clear_after(),
+        ))
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_rules(rules: Vec<SuggestionRule>) -> Self {
+        Self::with_board(SuggestionBoard::new(rules))
+    }
+
+    fn with_board(board: SuggestionBoard) -> Self {
         Self {
-            board: Arc::new(Mutex::new(SuggestionBoard::new(rules))),
+            board: Arc::new(Mutex::new(board)),
             tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -136,49 +152,6 @@ impl SuggestionsState {
     }
 }
 
-fn default_rules() -> Vec<SuggestionRule> {
-    let power_saver = || {
-        Some(ActionDescriptor {
-            label: "Switch to power saver".to_string(),
-            kind: ActionKind::SetPowerProfile(PowerProfile::PowerSaver),
-        })
-    };
-
-    vec![
-        SuggestionRule {
-            component_name: "total".to_string(),
-            threshold_watts: 15.0,
-            sustained_for: Duration::from_secs(3),
-            message: "Total power draw has been high. Consider switching to power saver profile."
-                .to_string(),
-            severity: Severity::Warning,
-            action: power_saver(),
-        },
-        SuggestionRule {
-            component_name: "cpu".to_string(),
-            threshold_watts: 8.0,
-            sustained_for: Duration::from_secs(3),
-            message:
-                "CPU power draw has been high. Consider reducing workload or switching to power saver."
-                    .to_string(),
-            severity: Severity::Warning,
-            action: power_saver(),
-        },
-        SuggestionRule {
-            component_name: "cpu".to_string(),
-            threshold_watts: 8.0,
-            sustained_for: Duration::from_secs(10),
-            message: "CPU usage has been high for a while. Review top processes to identify what's consuming resources."
-                .to_string(),
-            severity: Severity::Info,
-            action: Some(ActionDescriptor {
-                label: "Show top processes".to_string(),
-                kind: ActionKind::ShowTopProcesses,
-            }),
-        },
-    ]
-}
-
 fn new_token() -> String {
     rand::thread_rng()
         .sample_iter(rand::distributions::Alphanumeric)
@@ -255,6 +228,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use powerwatch_core::model::{Component, Confidence, SensorReading};
+    use powerwatch_core::suggestions::{ActionKind, Severity, SuggestionRule};
 
     fn snapshot_with(component: &str, watts: f64) -> Snapshot {
         Snapshot {
@@ -316,20 +290,71 @@ mod tests {
     }
 
     #[test]
-    fn the_default_rules_match_the_documented_thresholds() {
-        let rules: Vec<_> = default_rules()
-            .into_iter()
-            .map(|r| (r.component_name, r.threshold_watts, r.sustained_for))
-            .collect();
+    fn the_default_config_gives_the_documented_behaviour() {
+        let state = SuggestionsState::new();
 
+        tick_at(&state, 40.0, 0);
+        assert!(messages(&state).is_empty());
+
+        tick_at(&state, 40.0, 3);
+        assert_eq!(messages(&state).len(), 2);
+
+        tick_at(&state, 40.0, 10);
+        let actions: Vec<_> = state
+            .list_with_tokens()
+            .into_iter()
+            .filter_map(|p| p.suggestion.action.map(|a| a.label))
+            .collect();
         assert_eq!(
-            rules,
+            actions,
             vec![
-                ("total".to_string(), 15.0, Duration::from_secs(3)),
-                ("cpu".to_string(), 8.0, Duration::from_secs(3)),
-                ("cpu".to_string(), 8.0, Duration::from_secs(10)),
+                "Switch to power saver",
+                "Switch to power saver",
+                "Show top processes"
             ]
         );
+    }
+
+    fn state_from(toml: &str) -> SuggestionsState {
+        let config = powerwatch_core::config::Config::parse(toml).unwrap();
+        SuggestionsState::from_config(&config.suggestions)
+    }
+
+    #[test]
+    fn thresholds_from_the_config_are_used() {
+        let state = state_from(
+            "[suggestions.power_saver]\ntotal_watts = 500\ncpu_watts = 20\nsustained_seconds = 0\n\n[suggestions.top_processes]\nenabled = false\n",
+        );
+
+        tick_at(&state, 15.0, 0);
+        assert!(messages(&state).is_empty());
+
+        tick_at(&state, 25.0, 1);
+        assert_eq!(messages(&state).len(), 1);
+    }
+
+    #[test]
+    fn disabled_groups_never_fire() {
+        let state = state_from(
+            "[suggestions.power_saver]\nenabled = false\nsustained_seconds = 0\n\n[suggestions.top_processes]\nenabled = false\nsustained_seconds = 0\n",
+        );
+
+        tick_at(&state, 500.0, 0);
+
+        assert!(messages(&state).is_empty());
+    }
+
+    #[test]
+    fn clear_after_from_the_config_controls_how_long_a_suggestion_lingers() {
+        let state = state_from(
+            "[suggestions]\nclear_after_seconds = 0\n\n[suggestions.power_saver]\nsustained_seconds = 0\n\n[suggestions.top_processes]\nenabled = false\n",
+        );
+
+        tick_at(&state, 40.0, 0);
+        assert!(!messages(&state).is_empty());
+
+        tick_at(&state, 1.0, 1);
+        assert!(messages(&state).is_empty());
     }
 
     #[test]

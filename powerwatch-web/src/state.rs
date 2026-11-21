@@ -1,3 +1,4 @@
+use crate::suggestions::SuggestionsState;
 use powerwatch_core::sampler::{Sampler, Snapshot};
 use powerwatch_core::storage::Storage;
 use std::sync::{Arc, Mutex, RwLock};
@@ -10,19 +11,35 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
 pub struct AppState {
     pub latest_snapshot: Arc<RwLock<Snapshot>>,
     pub storage: Arc<Mutex<Option<Storage>>>,
-    pub suggestions: super::suggestions::SuggestionsState,
+    pub suggestions: SuggestionsState,
 }
 
+#[cfg(test)]
 pub fn start_sampling_loop(
-    mut sampler: Sampler,
+    sampler: Sampler,
     interval: Duration,
     storage: Option<Storage>,
     log_continuously: bool,
 ) -> AppState {
+    start_sampling_loop_with(
+        sampler,
+        interval,
+        storage,
+        log_continuously,
+        SuggestionsState::new(),
+    )
+}
+
+pub fn start_sampling_loop_with(
+    mut sampler: Sampler,
+    interval: Duration,
+    storage: Option<Storage>,
+    log_continuously: bool,
+    suggestions: SuggestionsState,
+) -> AppState {
     let initial = sampler.sample_all();
     let latest_snapshot = Arc::new(RwLock::new(initial));
     let storage = Arc::new(Mutex::new(storage));
-    let suggestions = super::suggestions::SuggestionsState::new();
     let state = AppState {
         latest_snapshot: latest_snapshot.clone(),
         storage: storage.clone(),

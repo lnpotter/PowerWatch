@@ -14,9 +14,7 @@ use powerwatch_core::runtime::build_default_sampler;
 use powerwatch_core::sampler::{Sampler, Snapshot};
 use powerwatch_core::storage::Storage;
 use powerwatch_core::suggestion_board::SuggestionBoard;
-use powerwatch_core::suggestions::{
-    ActionDescriptor, ActionKind, PowerProfile, Suggestion, SuggestionRule,
-};
+use powerwatch_core::suggestions::{ActionDescriptor, PowerProfile, Suggestion};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{self, Stdout};
@@ -33,6 +31,8 @@ struct Args {
     alert_for: Option<String>,
     #[arg(long)]
     alert_run: Option<String>,
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
@@ -66,6 +66,17 @@ fn restore_terminal() -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
+    let loaded = match powerwatch_core::config::load(args.config.as_deref()) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(notice) = &loaded.notice {
+        eprintln!("{notice}");
+    }
+    let config = loaded.config;
     let alert_setup = match resolve_alert_rule(
         args.alert_component.as_deref(),
         args.alert_above,
@@ -95,11 +106,17 @@ fn main() -> io::Result<()> {
     }
     let storage = Storage::open(&db_path).ok();
 
+    let board = SuggestionBoard::with_clear_after(
+        config.suggestions.power_saver_rules(),
+        config.suggestions.clear_after(),
+    );
+
     let mut terminal = setup_terminal()?;
     let result = run(
         &mut terminal,
         &mut sampler,
         storage,
+        board,
         alert_evaluator,
         alert_hook,
     );
@@ -115,6 +132,7 @@ fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     sampler: &mut Sampler,
     storage: Option<Storage>,
+    mut board: SuggestionBoard,
     mut alert_evaluator: Option<AlertEvaluator>,
     alert_hook: Option<String>,
 ) -> io::Result<()> {
@@ -122,31 +140,6 @@ fn run(
     let mut run_state = RunState::default();
     let mut logging_state = LoggingState::default();
     let mut suggestions_state = SuggestionsState::default();
-
-    let mut board = SuggestionBoard::new(vec![
-        SuggestionRule {
-            component_name: "total".to_string(),
-            threshold_watts: 15.0,
-            sustained_for: Duration::from_secs(3),  // shortened from 10s
-            message: "Total power draw has been high for a while. Consider switching to power saver profile.".to_string(),
-            severity: powerwatch_core::suggestions::Severity::Warning,
-            action: Some(powerwatch_core::suggestions::ActionDescriptor {
-                label: "Switch to power saver".to_string(),
-                kind: ActionKind::SetPowerProfile(PowerProfile::PowerSaver),
-            }),
-        },
-        SuggestionRule {
-            component_name: "cpu".to_string(),
-            threshold_watts: 8.0,
-            sustained_for: Duration::from_secs(3),  // shortened from 15s
-            message: "CPU power draw has been high. Consider reducing workload or switching to power saver.".to_string(),
-            severity: powerwatch_core::suggestions::Severity::Warning,
-            action: Some(powerwatch_core::suggestions::ActionDescriptor {
-                label: "Switch to power saver".to_string(),
-                kind: ActionKind::SetPowerProfile(PowerProfile::PowerSaver),
-            }),
-        },
-    ]);
 
     let mut suggestions: Vec<Suggestion> = Vec::new();
     let mut notice: Option<(String, Instant)> = None;
@@ -402,6 +395,7 @@ fn record_to_storage(storage: &Option<Storage>, snapshot: &powerwatch_core::samp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use powerwatch_core::suggestions::{ActionKind, SuggestionRule};
 
     fn open() -> SuggestionsState {
         SuggestionsState::Open { selected: 0 }

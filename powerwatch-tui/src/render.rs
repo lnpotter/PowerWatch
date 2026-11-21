@@ -1,4 +1,5 @@
 use crate::history::History;
+use powerwatch_core::actions::Platform;
 use powerwatch_core::model::Confidence;
 use powerwatch_core::sampler::Snapshot;
 use powerwatch_core::suggestions::Suggestion;
@@ -168,8 +169,20 @@ fn render_suggestions_panel(
     } else {
         Color::DarkGray
     };
-    let footer = Paragraph::new(panel_footer(state, suggestions.is_empty(), notice))
-        .style(Style::default().fg(footer_color));
+    let command = match state {
+        crate::state::SuggestionsState::Confirming { selected, .. } => suggestions
+            .get(*selected)
+            .and_then(|suggestion| suggestion.action.as_ref())
+            .map(|action| Platform::current().command_line(&action.kind)),
+        _ => None,
+    };
+    let footer = Paragraph::new(panel_footer(
+        state,
+        suggestions.is_empty(),
+        notice,
+        command.as_deref(),
+    ))
+    .style(Style::default().fg(footer_color));
     let footer_area = Rect {
         x: area.x,
         y: area.y + area.height - 1,
@@ -183,12 +196,14 @@ fn panel_footer(
     state: &crate::state::SuggestionsState,
     is_empty: bool,
     notice: Option<&str>,
+    command: Option<&str>,
 ) -> String {
     match (notice, state) {
         (Some(message), _) => format!("  {message}  "),
-        (None, crate::state::SuggestionsState::Confirming { .. }) => {
-            "  [y] apply  [n] cancel  ".to_string()
-        }
+        (None, crate::state::SuggestionsState::Confirming { .. }) => match command {
+            Some(command) => format!("  [y] apply  [n] cancel   runs: {command}  "),
+            None => "  [y] apply  [n] cancel  ".to_string(),
+        },
         (None, _) if is_empty => "  [s] close  ".to_string(),
         (None, _) => "  [up/down] select  [enter] apply  [d] dismiss  [s] close  ".to_string(),
     }
@@ -396,6 +411,80 @@ mod tests {
             .unwrap();
 
         buffer_text(&terminal)
+    }
+
+    fn power_profile_suggestion(
+        message: &str,
+        profile: powerwatch_core::suggestions::PowerProfile,
+    ) -> Suggestion {
+        Suggestion {
+            message: message.to_string(),
+            component_name: "cpu".to_string(),
+            severity: powerwatch_core::suggestions::Severity::Warning,
+            action: Some(powerwatch_core::suggestions::ActionDescriptor {
+                label: "Switch profile".to_string(),
+                kind: powerwatch_core::suggestions::ActionKind::SetPowerProfile(profile),
+            }),
+        }
+    }
+
+    fn command_for(profile: powerwatch_core::suggestions::PowerProfile) -> String {
+        Platform::current().command_line(
+            &powerwatch_core::suggestions::ActionKind::SetPowerProfile(profile),
+        )
+    }
+
+    #[test]
+    fn the_confirmation_shows_the_command_that_will_run() {
+        use powerwatch_core::suggestions::PowerProfile;
+        let suggestions = [power_profile_suggestion("high", PowerProfile::PowerSaver)];
+
+        let text = render_panel(
+            SuggestionsState::Confirming { id: 1, selected: 0 },
+            &suggestions,
+        );
+
+        assert!(text.contains(&format!("runs: {}", command_for(PowerProfile::PowerSaver))));
+        assert!(text.contains("[y] apply"));
+    }
+
+    #[test]
+    fn the_confirmation_shows_the_command_of_the_selected_row() {
+        use powerwatch_core::suggestions::PowerProfile;
+        let suggestions = [
+            power_profile_suggestion("first", PowerProfile::PowerSaver),
+            power_profile_suggestion("second", PowerProfile::Performance),
+        ];
+
+        let text = render_panel(
+            SuggestionsState::Confirming { id: 2, selected: 1 },
+            &suggestions,
+        );
+
+        assert!(text.contains(&format!("runs: {}", command_for(PowerProfile::Performance))));
+        assert!(!text.contains(&command_for(PowerProfile::PowerSaver)));
+    }
+
+    #[test]
+    fn the_command_is_not_shown_outside_a_confirmation() {
+        use powerwatch_core::suggestions::PowerProfile;
+        let suggestions = [power_profile_suggestion("high", PowerProfile::PowerSaver)];
+
+        let text = render_panel(SuggestionsState::Open { selected: 0 }, &suggestions);
+
+        assert!(!text.contains("runs:"));
+    }
+
+    #[test]
+    fn confirming_a_suggestion_without_an_action_shows_no_command() {
+        let suggestions = [suggestion("info only", false)];
+
+        let text = render_panel(
+            SuggestionsState::Confirming { id: 1, selected: 0 },
+            &suggestions,
+        );
+
+        assert!(!text.contains("runs:"));
     }
 
     #[test]

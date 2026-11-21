@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod alerts;
+pub mod config;
 pub mod discovery;
 pub mod duration;
 pub mod hook;

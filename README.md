@@ -151,7 +151,7 @@ The TUI can evaluate power-draw patterns and surface energy-saving suggestions. 
 | `n` / `N` | Cancel the confirmation (the suggestion stays in the list) |
 | `d` / `D` | Dismiss the selected suggestion |
 
-Nothing runs on its own: select a suggestion, press `Enter` to open the confirmation, then `y` to apply it. If the list changes while you are confirming, `y` only applies the suggestion you confirmed, and does nothing if it has already gone away. If the action fails, the reason is shown in the panel footer and the suggestion stays in the list. The TUI has two rules, total draw above 15 W or CPU draw above 8 W for 3 seconds, and both propose switching to the power saver profile. The one-time confirmation token belongs to the web dashboard (see below).
+Nothing runs on its own: select a suggestion, press `Enter` to open the confirmation (the footer shows the exact command it will run), then `y` to apply it. If the list changes while you are confirming, `y` only applies the suggestion you confirmed, and does nothing if it has already gone away. If the action fails, the reason is shown in the panel footer and the suggestion stays in the list. By default the TUI has two rules, total draw above 15 W or CPU draw above 8 W for 3 seconds (both can be changed, see [Configuration](#configuration)), and both propose switching to the power saver profile. The one-time confirmation token belongs to the web dashboard (see below).
 
 ## Web Dashboard
 
@@ -192,10 +192,12 @@ A suggestion appears once per excursion above its threshold and goes away on its
 
 ### Implemented Suggestions
 
-| Suggestion | Condition (web) | Condition (TUI) | Action | Safety |
-|------------|-----------------|-----------------|--------|--------|
-| **Switch to power saver** | Total > 15W for 3s, or CPU > 8W for 3s | Total > 15W for 3s, or CPU > 8W for 3s | Change power profile to `power-saver` | Modifies system profile |
-| **Show top processes** | CPU > 8W for 10s | Not available | Display top 5 CPU processes in a modal | Read-only, no system changes |
+| Suggestion | Default condition | Where | Action | Safety |
+|------------|-------------------|-------|--------|--------|
+| **Switch to power saver** | Total > 15W for 3s, or CPU > 8W for 3s | Web and TUI | Change power profile to `power-saver` | Modifies system profile |
+| **Show top processes** | CPU > 8W for 10s | Web only | Display top 5 CPU processes in a modal | Read-only, no system changes |
+
+The thresholds and durations above are defaults; see [Configuration](#configuration) to change them.
 
 Both the web dashboard and the TUI skip the power saver suggestion when the machine is already in that profile. It reads the current profile with `powerprofilesctl` (Linux), `pmset` (macOS) or `powercfg` (Windows, matched by the scheme's GUID, so localized names work). If the profile can't be detected, for instance with a custom Windows plan or a missing command, the suggestion still appears.
 
@@ -228,6 +230,45 @@ Use the web dashboard only on trusted local machines.
 **Windows**: LibreHardwareMonitor WMI provider when available (real CPU RAPL/MSR), falling back to `GetSystemTimes` × assumed TDP for CPU; NVML unchanged; RAM uses `GlobalMemoryStatusEx`; disk uses the PDH performance counter API.
 
 **macOS**: `powermetrics` for CPU/GPU (requires `sudo`), `vm_stat` + `sysctl hw.memsize` for RAM, `iostat` for disk. CPU and GPU are measured; disk and RAM are estimated.
+
+## Configuration
+
+The suggestion thresholds can be changed with a TOML file. The first time `powerwatch-tui` or `powerwatch-web` runs, it creates `config.toml` in the project folder (the one that contains `Cargo.toml`), filled with the defaults from [`config.example.toml`](config.example.toml). Edit it and restart. Every key is optional, so you only need to keep the ones you want to change:
+
+```toml
+[suggestions.power_saver]
+cpu_watts = 25.0
+sustained_seconds = 5
+
+[suggestions.top_processes]
+enabled = false
+```
+
+`powerwatch-tui` and `powerwatch-web` look for the file in this order:
+
+1. `--config <path>`
+2. the `POWERWATCH_CONFIG` environment variable
+3. `config.toml` in the project folder. PowerWatch finds the folder from the location of the executable, so it works from any directory and under `sudo`, and it creates the file there if it does not exist.
+4. `$XDG_CONFIG_HOME/powerwatch/config.toml`, or `~/.config/powerwatch/config.toml` (`%APPDATA%\powerwatch\config.toml` on Windows). This is only used when the executable is not inside the project folder, for example after copying it to `/usr/local/bin`, and PowerWatch does not create it.
+
+A file named with the flag or the variable must exist. Unknown keys, values of the wrong type and thresholds that are not positive numbers stop the program with a message that names the problem, instead of silently falling back to the defaults. `config.toml` holds your own settings, so add `/config.toml` to `.gitignore` to keep it out of your commits.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `suggestions.clear_after_seconds` | `5` | How long a suggestion stays after the draw falls back under its threshold |
+| `suggestions.power_saver.enabled` | `true` | Turns the "Switch to power saver" suggestions on or off |
+| `suggestions.power_saver.total_watts` | `15.0` | Total draw above which it is suggested |
+| `suggestions.power_saver.cpu_watts` | `8.0` | CPU draw above which it is suggested |
+| `suggestions.power_saver.sustained_seconds` | `3` | How long the draw must stay above the threshold |
+| `suggestions.top_processes.enabled` | `true` | Turns the "Show top processes" suggestion on or off (web only) |
+| `suggestions.top_processes.cpu_watts` | `8.0` | CPU draw above which it is suggested |
+| `suggestions.top_processes.sustained_seconds` | `10` | How long the draw must stay above the threshold |
+
+Running with `sudo` is fine: the project folder comes from the executable, not from `~`, and a file created under `sudo` is handed back to your user. If you copy the binaries elsewhere, `~` can point to root's home instead of yours; pass the file explicitly, and your shell expands `~` before `sudo` runs:
+
+```bash
+sudo powerwatch-tui --config ~/.config/powerwatch/config.toml
+```
 
 ## Development
 

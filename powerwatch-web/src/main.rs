@@ -17,6 +17,9 @@ struct Args {
 
     #[arg(long)]
     log: bool,
+
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 fn history_db_path() -> PathBuf {
@@ -27,6 +30,18 @@ fn history_db_path() -> PathBuf {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+
+    let loaded = match powerwatch_core::config::load(args.config.as_deref()) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(notice) = &loaded.notice {
+        eprintln!("{notice}");
+    }
+    let config = loaded.config;
 
     let sampler = build_default_sampler();
     if sampler.is_empty() {
@@ -51,7 +66,13 @@ async fn main() {
         );
     }
 
-    let app_state = state::start_sampling_loop(sampler, SAMPLE_INTERVAL, storage, args.log);
+    let app_state = state::start_sampling_loop_with(
+        sampler,
+        SAMPLE_INTERVAL,
+        storage,
+        args.log,
+        suggestions::SuggestionsState::from_config(&config.suggestions),
+    );
 
     let router = app::build_router(app_state);
     let addr = format!("127.0.0.1:{}", args.port);
